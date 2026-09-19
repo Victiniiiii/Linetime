@@ -23,7 +23,7 @@ struct FrameStamp {
 class ViterbiDecoder {
 public:
     static constexpr int BLANK_ID = 0;
-    static constexpr float NEG_INF = -1000.0f;
+    static constexpr float NEG_INF = -1e18f;
 
     struct ViterbiResult {
         std::vector<int> frame_phonemes;
@@ -34,24 +34,20 @@ public:
         const float* log_probs, int T, int C,
         const std::vector<int>& ctc_path,
         const std::vector<int>& ctc_path_idx,
-        int band_width = 0,
-        int start_frame = 0)
+        int band_width = 0)
     {
         int ctc_len = ctc_path.size();
         if (ctc_len == 0 || T == 0) return {{}, {}};
 
-        int effective_T = T - start_frame;
-        if (effective_T <= 0) return {{}, {}};
+        bool use_band = (band_width > 0 && T > 1 && ctc_len > 1);
+        float pace = use_band ? (float)(ctc_len - 1) / (T - 1) : 0.0f;
 
-        bool use_band = (band_width > 0 && effective_T > 1 && ctc_len > 1);
-        float pace = use_band ? (float)(ctc_len - 1) / (effective_T - 1) : 0.0f;
+        std::vector<std::vector<float>> dp(T, std::vector<float>(ctc_len, NEG_INF));
+        std::vector<std::vector<int>> backpointers(T, std::vector<int>(ctc_len, 0));
 
-        std::vector<std::vector<float>> dp(effective_T, std::vector<float>(ctc_len, NEG_INF));
-        std::vector<std::vector<int>> backpointers(effective_T, std::vector<int>(ctc_len, 0));
-
-        dp[0][0] = log_probs[start_frame * C + ctc_path[0]];
+        dp[0][0] = log_probs[ctc_path[0]];
         if (ctc_len > 1)
-            dp[0][1] = log_probs[start_frame * C + ctc_path[1]];
+            dp[0][1] = log_probs[ctc_path[1]];
 
         std::vector<bool> can_skip(ctc_len, false);
         for (int s = 2; s < ctc_len; s++) {
@@ -59,10 +55,9 @@ public:
                 can_skip[s] = true;
         }
 
-        for (int t = 1; t < effective_T; t++) {
-            int abs_t = start_frame + t;
+        for (int t = 1; t < T; t++) {
             for (int s = 0; s < ctc_len; s++) {
-                float emit = log_probs[abs_t * C + ctc_path[s]];
+                float emit = log_probs[t * C + ctc_path[s]];
                 float best_score = dp[t - 1][s] + emit;
                 int best_prev = s;
 
@@ -79,31 +74,31 @@ public:
             }
             if (use_band) {
                 float center = t * pace;
-                for (int s = 0; s < ctc_len; s++) {
-                    if ((float)s < center - band_width || (float)s > center + band_width)
-                        dp[t][s] = NEG_INF;
-                }
+                int lo = std::max(0, (int)(center - band_width));
+                int hi = std::min(ctc_len - 1, (int)(center + band_width));
+                for (int s = 0; s < lo; s++) dp[t][s] = NEG_INF;
+                for (int s = hi + 1; s < ctc_len; s++) dp[t][s] = NEG_INF;
             }
         }
 
         int final_state = 0;
         float best_final = NEG_INF;
         for (int s = 0; s < ctc_len; s++) {
-            if (dp[effective_T - 1][s] > best_final) {
-                best_final = dp[effective_T - 1][s];
+            if (dp[T - 1][s] > best_final) {
+                best_final = dp[T - 1][s];
                 final_state = s;
             }
         }
 
-        std::vector<int> path_states(effective_T);
-        path_states[effective_T - 1] = final_state;
-        for (int t = effective_T - 2; t >= 0; t--)
+        std::vector<int> path_states(T);
+        path_states[T - 1] = final_state;
+        for (int t = T - 2; t >= 0; t--)
             path_states[t] = backpointers[t + 1][path_states[t + 1]];
 
         ViterbiResult result;
-        result.frame_phonemes.resize(effective_T);
-        result.frame_phoneme_idx.resize(effective_T);
-        for (int t = 0; t < effective_T; t++) {
+        result.frame_phonemes.resize(T);
+        result.frame_phoneme_idx.resize(T);
+        for (int t = 0; t < T; t++) {
             result.frame_phonemes[t] = ctc_path[path_states[t]];
             result.frame_phoneme_idx[t] = ctc_path_idx[path_states[t]];
         }
@@ -199,6 +194,31 @@ struct CTCAligner::Impl {
 CTCAligner::CTCAligner() : impl_(new Impl()) {}
 CTCAligner::~CTCAligner() { delete impl_; }
 
+static std::vector<float> boost_target_phonemes(
+    const float* log_probs, int T, int C,
+    const std::vector<int>& target_tokens, float boost_factor = 5.0f)
+{
+    std::vector<float> boosted(log_probs, log_probs + T * C);
+
+    std::unordered_set<int> unique_targets(target_tokens.begin(), target_tokens.end());
+    unique_targets.erase(ViterbiDecoder::BLANK_ID);
+
+    for (int phoneme_idx : unique_targets) {
+        if (phoneme_idx >= 0 && phoneme_idx < C) {
+            for (int t = 0; t < T; t++)
+                boosted[t * C + phoneme_idx] += boost_factor;
+        }
+    }
+
+    for (int t = 0; t < T; t++) {
+        float mx = *std::max_element(boosted.data() + t*C, boosted.data() + (t+1)*C);
+        float sum = 0;
+        for (int c = 0; c < C; c++) { boosted[t*C+c] = std::exp(boosted[t*C+c] - mx); sum += boosted[t*C+c]; }
+        for (int c = 0; c < C; c++) { boosted[t*C+c] = std::log(boosted[t*C+c] / sum + 1e-10f); }
+    }
+    return boosted;
+}
+
 bool CTCAligner::init(const std::string& onnx_model_path,
                        const std::string& tokenizer_path) {
     ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
@@ -214,7 +234,6 @@ bool CTCAligner::init(const std::string& onnx_model_path,
     if (s) { ort->ReleaseStatus(s); return false; }
     ort->SetIntraOpNumThreads(impl_->session_opts, 4);
 
-    // Try CUDA execution provider, fall back to CPU
     OrtCUDAProviderOptions cuda_opts{};
     cuda_opts.device_id = 0;
     cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
@@ -242,112 +261,92 @@ bool CTCAligner::init(const std::string& onnx_model_path,
     return true;
 }
 
-static std::vector<float> boost_target_phonemes(
-    const float* log_probs, int T, int C,
-    const std::vector<int>& target_tokens, float boost_factor = 5.0f)
-{
-    std::vector<float> boosted(log_probs, log_probs + T * C);
-
-    std::unordered_set<int> unique_targets(target_tokens.begin(), target_tokens.end());
-    unique_targets.erase(ViterbiDecoder::BLANK_ID);
-
-    for (int phoneme_idx : unique_targets) {
-        if (phoneme_idx >= 0 && phoneme_idx < C) {
-            for (int t = 0; t < T; t++)
-                boosted[t * C + phoneme_idx] += boost_factor;
-        }
-    }
-
-    for (int t = 0; t < T; t++) {
-        float mx = *std::max_element(boosted.data() + t*C, boosted.data() + (t+1)*C);
-        float sum = 0;
-        for (int c = 0; c < C; c++) { boosted[t*C+c] = std::exp(boosted[t*C+c] - mx); sum += boosted[t*C+c]; }
-        for (int c = 0; c < C; c++) { boosted[t*C+c] = std::log(boosted[t*C+c] / sum + 1e-10f); }
-    }
-    return boosted;
-}
-
 CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocument& lyrics) {
     CTCAlignerResult result;
     if (!impl_->initialized) { result.error = "CTC aligner not initialized"; return result; }
     if (audio.n_samples == 0) { result.error = "Empty audio"; return result; }
 
-    constexpr int CHUNK_SECONDS = 60;
     constexpr int SAMPLE_RATE = 16000;
-    int chunk_samples = CHUNK_SECONDS * SAMPLE_RATE;
-    int total_samples = audio.n_samples;
-    int num_chunks = (total_samples + chunk_samples - 1) / chunk_samples;
 
-    std::vector<float> all_lp;
+    std::vector<float> all_raw;
     int total_T = 0;
     int C = 0;
 
-    for (int chunk = 0; chunk < num_chunks; chunk++) {
-        int start = chunk * chunk_samples;
-        int end = std::min(start + chunk_samples, total_samples);
-        int chunk_len = end - start;
+    {
+        constexpr int CHUNK_SECONDS = 60;
+        int chunk_samples = CHUNK_SECONDS * SAMPLE_RATE;
+        int total_samples = audio.n_samples;
+        int num_chunks = (total_samples + chunk_samples - 1) / chunk_samples;
 
-        fprintf(stderr, "[ctc] Processing chunk %d/%d (%.1f-%.1f sec)...\n",
-                chunk + 1, num_chunks, start / 16000.0, end / 16000.0);
+        for (int chunk = 0; chunk < num_chunks; chunk++) {
+            int start = chunk * chunk_samples;
+            int end = std::min(start + chunk_samples, total_samples);
+            int chunk_len = end - start;
 
-        std::vector<int64_t> input_shape = {1, chunk_len};
-        OrtMemoryInfo* mem_info = nullptr;
-        ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_info);
-        OrtValue* in_tensor = nullptr;
-        ort->CreateTensorWithDataAsOrtValue(
-            mem_info, (void*)(audio.samples.data() + start), chunk_len * sizeof(float),
-            input_shape.data(), 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_tensor);
+            fprintf(stderr, "[ctc] Processing chunk %d/%d (%.1f-%.1f sec)...\n",
+                    chunk + 1, num_chunks, start / 16000.0, end / 16000.0);
 
-        OrtAllocator* allocator = nullptr;
-        ort->GetAllocatorWithDefaultOptions(&allocator);
-        char* in_name = nullptr; char* out_name = nullptr;
-        ort->SessionGetInputName(impl_->session, 0, allocator, &in_name);
-        ort->SessionGetOutputName(impl_->session, 0, allocator, &out_name);
-        const char* in_names[] = {in_name};
-        const char* out_names[] = {out_name};
+            std::vector<int64_t> input_shape = {1, chunk_len};
+            OrtMemoryInfo* mem_info = nullptr;
+            ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_info);
+            OrtValue* in_tensor = nullptr;
+            ort->CreateTensorWithDataAsOrtValue(
+                mem_info, (void*)(audio.samples.data() + start), chunk_len * sizeof(float),
+                input_shape.data(), 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_tensor);
 
-        OrtValue* out_tensor = nullptr;
-        OrtStatus* status = ort->Run(impl_->session, nullptr,
-            in_names, &in_tensor, 1, out_names, 1, &out_tensor);
-        if (status) {
-            result.error = std::string("ONNX run failed: ") + ort->GetErrorMessage(status);
-            ort->ReleaseStatus(status); ort->ReleaseValue(in_tensor);
+            OrtAllocator* allocator = nullptr;
+            ort->GetAllocatorWithDefaultOptions(&allocator);
+            char* in_name = nullptr; char* out_name = nullptr;
+            ort->SessionGetInputName(impl_->session, 0, allocator, &in_name);
+            ort->SessionGetOutputName(impl_->session, 0, allocator, &out_name);
+            const char* in_names[] = {in_name};
+            const char* out_names[] = {out_name};
+
+            OrtValue* out_tensor = nullptr;
+            OrtStatus* status = ort->Run(impl_->session, nullptr,
+                in_names, &in_tensor, 1, out_names, 1, &out_tensor);
+            if (status) {
+                result.error = std::string("ONNX run failed: ") + ort->GetErrorMessage(status);
+                ort->ReleaseStatus(status); ort->ReleaseValue(in_tensor);
+                ort->ReleaseMemoryInfo(mem_info);
+                allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
+                return result;
+            }
+
+            OrtTensorTypeAndShapeInfo* shape_info = nullptr;
+            ort->GetTensorTypeAndShape(out_tensor, &shape_info);
+            size_t nd = 0; ort->GetDimensionsCount(shape_info, &nd);
+            std::vector<int64_t> out_shape(nd);
+            ort->GetDimensions(shape_info, out_shape.data(), nd);
+            ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+            int T = out_shape[1]; C = out_shape[2];
+
+            float* raw_output = nullptr;
+            ort->GetTensorMutableData(out_tensor, (void**)&raw_output);
+
+            all_raw.insert(all_raw.end(), raw_output, raw_output + T * C);
+            total_T += T;
+
+            ort->ReleaseValue(out_tensor); ort->ReleaseValue(in_tensor);
             ort->ReleaseMemoryInfo(mem_info);
             allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
-            return result;
         }
+    }
 
-        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-        ort->GetTensorTypeAndShape(out_tensor, &shape_info);
-        size_t nd = 0; ort->GetDimensionsCount(shape_info, &nd);
-        std::vector<int64_t> out_shape(nd);
-        ort->GetDimensions(shape_info, out_shape.data(), nd);
-        ort->ReleaseTensorTypeAndShapeInfo(shape_info);
-        int T = out_shape[1]; C = out_shape[2];
-
-        float* raw_output = nullptr;
-        ort->GetTensorMutableData(out_tensor, (void**)&raw_output);
-
-        for (int t = 0; t < T; t++) {
-            float mx = *std::max_element(raw_output + t*C, raw_output + (t+1)*C);
-            float sum = 0;
-            for (int c = 0; c < C; c++) { all_lp.push_back(std::exp(raw_output[t*C+c] - mx)); sum += all_lp.back(); }
-            for (int c = 0; c < C; c++) { all_lp[all_lp.size() - C + c] = std::log(all_lp[all_lp.size() - C + c] / sum + 1e-10f); }
-        }
-        total_T += T;
-
-        ort->ReleaseValue(out_tensor); ort->ReleaseValue(in_tensor);
-        ort->ReleaseMemoryInfo(mem_info);
-        allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
+    for (int t = 0; t < total_T; t++) {
+        all_raw[t * C + 28] = -1e9f;
     }
 
     fprintf(stderr, "[ctc] Total: %d frames (%.1f sec), vocab: %d\n", total_T, audio.duration_sec, C);
 
     double frame_ms = 20.0;
     int prev_end_frame = 0;
+    int line_count = 0;
 
     for (const auto& line : lyrics.lines) {
         if (line.is_ref || line.normalized.empty()) continue;
+        line_count++;
+
         std::vector<int> tokens = impl_->tokenizer.tokenize(line.text);
         if (tokens.empty()) {
             AlignedLine al; al.line_index = line.index;
@@ -373,11 +372,17 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
 
         int start_frame = prev_end_frame;
         int search_T = total_T - start_frame;
+        if (search_T <= 0) {
+            AlignedLine al; al.line_index = line.index;
+            al.start_ms = total_T * frame_ms; al.end_ms = total_T * frame_ms;
+            al.confidence = 0; al.text = line.text;
+            result.lines.push_back(al); continue;
+        }
 
-        auto boosted = boost_target_phonemes(all_lp.data() + start_frame * C, search_T, C, tokens, 5.0f);
+        auto boosted = boost_target_phonemes(all_raw.data() + start_frame * C, search_T, C, tokens, 20.0f);
 
-        int band_width = (ctc_len > 60) ? std::max(ctc_len / 3, 20) : 0;
-        auto vr = ViterbiDecoder::viterbi_decode(boosted.data(), search_T, C, ctc_path, ctc_path_idx, band_width, 0);
+        int band_width = std::max(ctc_len / 3, 20);
+        auto vr = ViterbiDecoder::viterbi_decode(boosted.data(), search_T, C, ctc_path, ctc_path_idx, band_width);
 
         auto stamps = ViterbiDecoder::assort_frames(vr.frame_phonemes, vr.frame_phoneme_idx, start_frame);
 
@@ -405,6 +410,6 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
     }
 
     result.success = true;
-    fprintf(stderr, "[ctc] Aligned %zu lines\n", result.lines.size());
+    fprintf(stderr, "[ctc] Aligned %d lines\n", line_count);
     return result;
 }
