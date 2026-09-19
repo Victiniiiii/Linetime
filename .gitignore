@@ -1,0 +1,10 @@
+build/
+models/*.onnx
+models/*.onnx.data
+models/*.bin
+vendor/onnxruntime/
+*.lrc
+*.o
+*.a
+*.so
+*.so.*
