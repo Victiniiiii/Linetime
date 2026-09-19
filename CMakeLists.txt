@@ -14,8 +14,8 @@ pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVUTIL  REQUIRED libavutil)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 
-# ONNX Runtime (use local vendor copy)
-set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
+# ONNX Runtime GPU (use local vendor copy)
+set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime-linux-x64-gpu-1.19.2")
 add_library(onnxruntime::onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime::onnxruntime PROPERTIES
     IMPORTED_LOCATION "${ONNXRUNTIME_DIR}/lib/libonnxruntime.so"

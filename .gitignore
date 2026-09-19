@@ -8,3 +8,5 @@ vendor/onnxruntime/
 *.a
 *.so
 *.so.*
+vendor/cuda/
+vendor/onnxruntime-linux-x64-gpu-1.19.2/

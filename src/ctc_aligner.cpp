@@ -213,6 +213,22 @@ bool CTCAligner::init(const std::string& onnx_model_path,
     s = ort->CreateSessionOptions(&impl_->session_opts);
     if (s) { ort->ReleaseStatus(s); return false; }
     ort->SetIntraOpNumThreads(impl_->session_opts, 4);
+
+    // Try CUDA execution provider, fall back to CPU
+    OrtCUDAProviderOptions cuda_opts{};
+    cuda_opts.device_id = 0;
+    cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
+    cuda_opts.gpu_mem_limit = 8ULL * 1024 * 1024 * 1024;
+    cuda_opts.arena_extend_strategy = 1;
+    cuda_opts.do_copy_in_default_stream = 1;
+    s = ort->SessionOptionsAppendExecutionProvider_CUDA(impl_->session_opts, &cuda_opts);
+    if (s) {
+        fprintf(stderr, "[ctc] CUDA provider not available, using CPU: %s\n", ort->GetErrorMessage(s));
+        ort->ReleaseStatus(s);
+    } else {
+        fprintf(stderr, "[ctc] Using CUDA execution provider (GPU)\n");
+    }
+
     s = ort->CreateSession(impl_->env, onnx_model_path.c_str(), impl_->session_opts, &impl_->session);
     if (s) {
         fprintf(stderr, "[ctc] Failed to load model: %s\n", ort->GetErrorMessage(s));
@@ -256,52 +272,76 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
     if (!impl_->initialized) { result.error = "CTC aligner not initialized"; return result; }
     if (audio.n_samples == 0) { result.error = "Empty audio"; return result; }
 
-    std::vector<int64_t> input_shape = {1, audio.n_samples};
-    OrtMemoryInfo* mem_info = nullptr;
-    ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_info);
-    OrtValue* in_tensor = nullptr;
-    ort->CreateTensorWithDataAsOrtValue(
-        mem_info, (void*)audio.samples.data(), audio.n_samples * sizeof(float),
-        input_shape.data(), 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_tensor);
+    constexpr int CHUNK_SECONDS = 60;
+    constexpr int SAMPLE_RATE = 16000;
+    int chunk_samples = CHUNK_SECONDS * SAMPLE_RATE;
+    int total_samples = audio.n_samples;
+    int num_chunks = (total_samples + chunk_samples - 1) / chunk_samples;
 
-    OrtAllocator* allocator = nullptr;
-    ort->GetAllocatorWithDefaultOptions(&allocator);
-    char* in_name = nullptr; char* out_name = nullptr;
-    ort->SessionGetInputName(impl_->session, 0, allocator, &in_name);
-    ort->SessionGetOutputName(impl_->session, 0, allocator, &out_name);
-    const char* in_names[] = {in_name};
-    const char* out_names[] = {out_name};
+    std::vector<float> all_lp;
+    int total_T = 0;
+    int C = 0;
 
-    OrtValue* out_tensor = nullptr;
-    OrtStatus* status = ort->Run(impl_->session, nullptr,
-        in_names, &in_tensor, 1, out_names, 1, &out_tensor);
-    if (status) {
-        result.error = std::string("ONNX run failed: ") + ort->GetErrorMessage(status);
-        ort->ReleaseStatus(status); ort->ReleaseValue(in_tensor);
+    for (int chunk = 0; chunk < num_chunks; chunk++) {
+        int start = chunk * chunk_samples;
+        int end = std::min(start + chunk_samples, total_samples);
+        int chunk_len = end - start;
+
+        fprintf(stderr, "[ctc] Processing chunk %d/%d (%.1f-%.1f sec)...\n",
+                chunk + 1, num_chunks, start / 16000.0, end / 16000.0);
+
+        std::vector<int64_t> input_shape = {1, chunk_len};
+        OrtMemoryInfo* mem_info = nullptr;
+        ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_info);
+        OrtValue* in_tensor = nullptr;
+        ort->CreateTensorWithDataAsOrtValue(
+            mem_info, (void*)(audio.samples.data() + start), chunk_len * sizeof(float),
+            input_shape.data(), 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in_tensor);
+
+        OrtAllocator* allocator = nullptr;
+        ort->GetAllocatorWithDefaultOptions(&allocator);
+        char* in_name = nullptr; char* out_name = nullptr;
+        ort->SessionGetInputName(impl_->session, 0, allocator, &in_name);
+        ort->SessionGetOutputName(impl_->session, 0, allocator, &out_name);
+        const char* in_names[] = {in_name};
+        const char* out_names[] = {out_name};
+
+        OrtValue* out_tensor = nullptr;
+        OrtStatus* status = ort->Run(impl_->session, nullptr,
+            in_names, &in_tensor, 1, out_names, 1, &out_tensor);
+        if (status) {
+            result.error = std::string("ONNX run failed: ") + ort->GetErrorMessage(status);
+            ort->ReleaseStatus(status); ort->ReleaseValue(in_tensor);
+            ort->ReleaseMemoryInfo(mem_info);
+            allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
+            return result;
+        }
+
+        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
+        ort->GetTensorTypeAndShape(out_tensor, &shape_info);
+        size_t nd = 0; ort->GetDimensionsCount(shape_info, &nd);
+        std::vector<int64_t> out_shape(nd);
+        ort->GetDimensions(shape_info, out_shape.data(), nd);
+        ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        int T = out_shape[1]; C = out_shape[2];
+
+        float* raw_output = nullptr;
+        ort->GetTensorMutableData(out_tensor, (void**)&raw_output);
+
+        for (int t = 0; t < T; t++) {
+            float mx = *std::max_element(raw_output + t*C, raw_output + (t+1)*C);
+            float sum = 0;
+            for (int c = 0; c < C; c++) { all_lp.push_back(std::exp(raw_output[t*C+c] - mx)); sum += all_lp.back(); }
+            for (int c = 0; c < C; c++) { all_lp[all_lp.size() - C + c] = std::log(all_lp[all_lp.size() - C + c] / sum + 1e-10f); }
+        }
+        total_T += T;
+
+        ort->ReleaseValue(out_tensor); ort->ReleaseValue(in_tensor);
         ort->ReleaseMemoryInfo(mem_info);
         allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
-        return result;
     }
 
-    OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-    ort->GetTensorTypeAndShape(out_tensor, &shape_info);
-    size_t nd = 0; ort->GetDimensionsCount(shape_info, &nd);
-    std::vector<int64_t> out_shape(nd);
-    ort->GetDimensions(shape_info, out_shape.data(), nd);
-    ort->ReleaseTensorTypeAndShapeInfo(shape_info);
-    int T = out_shape[1], C = out_shape[2];
-    fprintf(stderr, "[ctc] Frames: %d (%.1f sec), vocab: %d\n", T, audio.duration_sec, C);
-
-    float* raw_output = nullptr;
-    ort->GetTensorMutableData(out_tensor, (void**)&raw_output);
-
-    std::vector<float> lp(T * C);
-    for (int t = 0; t < T; t++) {
-        float mx = *std::max_element(raw_output + t*C, raw_output + (t+1)*C);
-        float sum = 0;
-        for (int c = 0; c < C; c++) { lp[t*C+c] = std::exp(raw_output[t*C+c] - mx); sum += lp[t*C+c]; }
-        for (int c = 0; c < C; c++) { lp[t*C+c] = std::log(lp[t*C+c] / sum + 1e-10f); }
-    }
+    fprintf(stderr, "[ctc] Total: %d frames (%.1f sec), vocab: %d\n", total_T, audio.duration_sec, C);
 
     double frame_ms = 20.0;
     int prev_end_frame = 0;
@@ -317,8 +357,8 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
 
         int S = tokens.size();
         int stride = 4;
-        if (stride * S + 1 > (int)(T * 0.9)) stride = 3;
-        if (stride * S + 1 > (int)(T * 0.8)) stride = 2;
+        if (stride * S + 1 > (int)(total_T * 0.9)) stride = 3;
+        if (stride * S + 1 > (int)(total_T * 0.8)) stride = 2;
         int ctc_len = stride * S + 1;
 
         std::vector<int> ctc_path(ctc_len, ViterbiDecoder::BLANK_ID);
@@ -332,9 +372,9 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
         }
 
         int start_frame = prev_end_frame;
-        int search_T = T - start_frame;
+        int search_T = total_T - start_frame;
 
-        auto boosted = boost_target_phonemes(lp.data() + start_frame * C, search_T, C, tokens, 5.0f);
+        auto boosted = boost_target_phonemes(all_lp.data() + start_frame * C, search_T, C, tokens, 5.0f);
 
         int band_width = (ctc_len > 60) ? std::max(ctc_len / 3, 20) : 0;
         auto vr = ViterbiDecoder::viterbi_decode(boosted.data(), search_T, C, ctc_path, ctc_path_idx, band_width, 0);
@@ -347,7 +387,7 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
         for (auto& st : stamps) {
             if (s_ms < 0) s_ms = st.start_frame * frame_ms;
             e_ms = (st.end_frame) * frame_ms;
-            for (int t = st.start_frame; t < st.end_frame && t < T; t++) {
+            for (int t = st.start_frame; t < st.end_frame && t < total_T; t++) {
                 conf += std::exp(boosted[(t - start_frame) * C + st.phoneme_id]);
                 matched++;
             }
@@ -365,9 +405,6 @@ CTCAlignerResult CTCAligner::align(const AudioBuffer& audio, const LyricsDocumen
     }
 
     result.success = true;
-    ort->ReleaseValue(out_tensor); ort->ReleaseValue(in_tensor);
-    ort->ReleaseMemoryInfo(mem_info);
-    allocator->Free(allocator, in_name); allocator->Free(allocator, out_name);
     fprintf(stderr, "[ctc] Aligned %zu lines\n", result.lines.size());
     return result;
 }
