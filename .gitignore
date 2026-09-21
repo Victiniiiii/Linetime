@@ -3,9 +3,13 @@ build/
 build-static/
 dist/
 *.o
-*.a
 *.so
 *.so.*
+*.lrc
+
+# Static libs: tracked in vendor/onnxruntime/lib/
+*.a
+!vendor/onnxruntime/lib/*.a
 
 # Model files (download via download_models.sh)
 models/*.onnx
@@ -14,13 +18,9 @@ models/*.bin
 models/mms_config.json
 models/mms_vocab.json
 
-# ONNX Runtime vendor
-vendor/onnxruntime/
-vendor/onnxruntime-linux-x64-gpu-1.19.2/
+# CUDA / old vendor dirs
 vendor/cuda/
-
-# Generated outputs
-*.lrc
+vendor/onnxruntime-linux-x64-gpu-1.19.2/
 
 # Internal docs
 AGENTS.md

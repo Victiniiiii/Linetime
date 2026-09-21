@@ -18,17 +18,18 @@ void print_usage() {
         "Usage: linetime <audio_file> <lyrics_file> [options]\n\n"
         "Options:\n"
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
+        "  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)\n"
         "  --model-a <path>         MMS_FA ONNX model (default: models/mms_fa.onnx)\n"
         "  --model-b <path>         Whisper GGML model (default: models/ggml-base.bin)\n"
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
-        "  --method <a|b|both>      Alignment method (default: both)\n"
+        "  --method <a|b|both>      Alignment method (default: a)\n"
         "  --verbose                Print detailed alignment info\n"
         "  -h, --help               Show this help\n\n"
         "Methods:\n"
-        "  a    CTC forced alignment only (MMS_FA)\n"
+        "  a    CTC forced alignment only (MMS multilingual)\n"
         "  b    Whisper DTW alignment only\n"
-        "  both Hybrid: run both, merge best results (default)\n"
+        "  both Hybrid: run both, merge best results\n"
     );
 }
 
@@ -41,17 +42,20 @@ int main(int argc, char** argv) {
     std::string audio_path;
     std::string lyrics_path;
     std::string output_path;
+    std::string ffmpeg_path;
     std::string model_a_path = "models/mms_fa.onnx";
     std::string model_b_path = "models/ggml-base.bin";
     std::string tokenizer_path = "models/tokenizer.json";
     std::string language = "auto";
-    std::string method = "both";
+    std::string method = "a";
     bool verbose = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-o" || arg == "--output") {
             if (i + 1 < argc) output_path = argv[++i];
+        } else if (arg == "--ffmpeg") {
+            if (i + 1 < argc) ffmpeg_path = argv[++i];
         } else if (arg == "--model-a") {
             if (i + 1 < argc) model_a_path = argv[++i];
         } else if (arg == "--model-b") {
@@ -93,7 +97,7 @@ int main(int argc, char** argv) {
 
     // Step 1: Load audio
     fprintf(stderr, "[1/5] Loading audio...\n");
-    AudioBuffer audio = load_audio(audio_path);
+    AudioBuffer audio = load_audio(audio_path, ffmpeg_path);
     if (audio.n_samples == 0) {
         fprintf(stderr, "Error: failed to load audio\n");
         return 1;

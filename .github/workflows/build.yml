@@ -1,0 +1,220 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build whisper.cpp (static)
+        run: |
+          mkdir -p build-static
+          cd build-static
+          cmake ../vendor/whisper.cpp -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENMP=OFF
+          cmake --build . -j$(nproc)
+
+      - name: Build linetime
+        run: |
+          WHISPER_SRC="vendor/whisper.cpp/include"
+          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
+          GGML_STATIC="build-static/ggml/src"
+          WHISPER_STATIC="build-static/src"
+          ONNX_DIR="vendor/onnxruntime"
+
+          ORT_LIBS=""
+          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
+            ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
+          done
+
+          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
+            -I"$ONNX_DIR/include/onnxruntime/core/session" \
+            -o linetime-linux-x64 \
+            src/main.cpp src/audio.cpp src/lyrics.cpp \
+            src/ctc_aligner.cpp src/whisper_aligner.cpp \
+            src/merger.cpp src/lrc_writer.cpp \
+            "$WHISPER_STATIC/libwhisper.a" \
+            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
+            $ORT_LIBS \
+            -Wl,--allow-multiple-definition \
+            -lpthread -ldl -lm -lgomp -lz
+
+      - name: Download ffmpeg
+        run: |
+          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar xf ffmpeg-release-amd64-static.tar.xz
+          cp ffmpeg-*-static/ffmpeg .
+
+      - name: Verify
+        run: |
+          ./linetime-linux-x64 --help
+          ldd linetime-linux-x64
+
+      - name: Package
+        run: |
+          tar czf linetime-linux-x64.tar.gz linetime-linux-x64 ffmpeg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-linux-x64
+          path: linetime-linux-x64.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build whisper.cpp (static, universal)
+        run: |
+          mkdir -p build-static
+          cd build-static
+          cmake ../vendor/whisper.cpp \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENMP=OFF \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build . -j$(sysctl -n hw.ncpu)
+
+      - name: Build linetime (universal)
+        run: |
+          WHISPER_SRC="vendor/whisper.cpp/include"
+          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
+          GGML_STATIC="build-static/ggml/src"
+          WHISPER_STATIC="build-static/src"
+          ONNX_DIR="vendor/onnxruntime"
+
+          ORT_LIBS=""
+          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
+            ORT_LIBS="$ORT_LIBS -Wl,-force_load,$lib"
+          done
+
+          clang++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
+            -I"$ONNX_DIR/include/onnxruntime/core/session" \
+            -arch arm64 -arch x86_64 \
+            -o linetime-macos-universal \
+            src/main.cpp src/audio.cpp src/lyrics.cpp \
+            src/ctc_aligner.cpp src/whisper_aligner.cpp \
+            src/merger.cpp src/lrc_writer.cpp \
+            "$WHISPER_STATIC/libwhisper.a" \
+            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
+            $ORT_LIBS \
+            -lpthread -lm -lz
+
+      - name: Download ffmpeg
+        run: |
+          brew install ffmpeg
+          cp "$(which ffmpeg)" .
+
+      - name: Verify
+        run: |
+          file linetime-macos-universal
+          ./linetime-macos-universal --help
+
+      - name: Package
+        run: |
+          tar czf linetime-macos-universal.tar.gz linetime-macos-universal ffmpeg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-macos-universal
+          path: linetime-macos-universal.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make
+
+      - name: Build whisper.cpp (static)
+        run: |
+          mkdir -p build-static
+          cd build-static
+          cmake ../vendor/whisper.cpp \
+            -G "MSYS Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENMP=OFF
+          cmake --build . -j$(nproc)
+
+      - name: Build linetime
+        run: |
+          WHISPER_SRC="vendor/whisper.cpp/include"
+          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
+          GGML_STATIC="build-static/ggml/src"
+          WHISPER_STATIC="build-static/src"
+          ONNX_DIR="vendor/onnxruntime"
+
+          ORT_LIBS=""
+          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
+            ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
+          done
+
+          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
+            -I"$ONNX_DIR/include/onnxruntime/core/session" \
+            -o linetime-windows-x64.exe \
+            src/main.cpp src/audio.cpp src/lyrics.cpp \
+            src/ctc_aligner.cpp src/whisper_aligner.cpp \
+            src/merger.cpp src/lrc_writer.cpp \
+            "$WHISPER_STATIC/libwhisper.a" \
+            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
+            $ORT_LIBS \
+            -Wl,--allow-multiple-definition \
+            -lpthread -lm -lz
+
+      - name: Download ffmpeg
+        run: |
+          wget -q https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          unzip -q ffmpeg-release-essentials.zip
+          cp ffmpeg-*-essentials_build/bin/ffmpeg.exe .
+
+      - name: Verify
+        run: |
+          ./linetime-windows-x64.exe --help
+
+      - name: Package
+        run: |
+          tar czf linetime-windows-x64.tar.gz linetime-windows-x64.exe ffmpeg.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-windows-x64
+          path: linetime-windows-x64.tar.gz
+
+  release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            linetime-linux-x64/linetime-linux-x64.tar.gz
+            linetime-macos-universal/linetime-macos-universal.tar.gz
+            linetime-windows-x64/linetime-windows-x64.tar.gz
+          generate_release_notes: true

@@ -26,8 +26,8 @@ cmake --build . -j$(nproc)
 
 # Run
 ./linetime song.wav lyrics.txt --method a \
-  --model-a ../models/mms_multilingual.onnx \
-  --tokenizer ../models/mms_multilingual_tokenizer.json
+  --model-a models/mms_multilingual.onnx \
+  --tokenizer models/mms_multilingual_tokenizer.json
 ```
 
 ## Usage
@@ -37,12 +37,12 @@ linetime <audio_file> <lyrics_file> [options]
 
 Options:
   -o, --output <path>      Output LRC file (default: <audio>.lrc)
+  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)
   --model-a <path>         MMS multilingual ONNX model
   --model-b <path>         Whisper GGML model
   --tokenizer <path>       Tokenizer JSON
   --language <code>        Language hint for whisper (default: auto)
   --method <a|b|both>      Alignment method (default: a)
-  --boost <float>          CTC non-blank boost (default: 5.0)
   --verbose                Print detailed alignment info
   -h, --help               Show this help
 
