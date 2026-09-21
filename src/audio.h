@@ -12,8 +12,8 @@ struct AudioBuffer {
 };
 
 // Load any audio file and convert to 16kHz mono float32
-// Returns empty buffer on failure
-AudioBuffer load_audio(const std::string& path);
+// ffmpeg_path: path to ffmpeg binary (empty = search PATH)
+AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path = "");
 
 // Load a 16kHz mono WAV file directly (fast path)
-AudioBuffer load_wav_16k_mono(const std::string& path);
+AudioBuffer load_wav_16k_mono(const std::string& path, const std::string& ffmpeg_path = "");

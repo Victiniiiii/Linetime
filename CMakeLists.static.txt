@@ -19,7 +19,6 @@ set_target_properties(whisper PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${WHISPER_CPP_DIR}/src"
 )
 
-# Also need ggml static libs
 add_library(ggml STATIC IMPORTED)
 set_target_properties(ggml PROPERTIES
     IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml.a"
@@ -35,14 +34,9 @@ set_target_properties(ggml-cpu PROPERTIES
     IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml-cpu.a"
 )
 
-# ---- ONNX Runtime (shared, bundled) ----
+# ---- ONNX Runtime (static, no .so needed) ----
 set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
-add_library(onnxruntime::onnxruntime SHARED IMPORTED)
-set_target_properties(onnxruntime::onnxruntime PROPERTIES
-    IMPORTED_LOCATION "${ONNXRUNTIME_DIR}/lib/libonnxruntime.so"
-    IMPORTED_NO_SONAME TRUE
-    INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_DIR}/include"
-)
+file(GLOB ORT_STATIC_LIBS "${ONNXRUNTIME_DIR}/lib/*.a")
 
 # ---- linetime executable ----
 
@@ -60,13 +54,7 @@ target_include_directories(linetime PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/vendor
     ${WHISPER_CPP_DIR}/src
-    ${ONNXRUNTIME_DIR}/include
-)
-
-# Use rpath=$ORIGIN so bundled .so files are found next to the binary
-set_target_properties(linetime PROPERTIES
-    BUILD_RPATH "$ORIGIN"
-    INSTALL_RPATH "$ORIGIN"
+    ${ONNXRUNTIME_DIR}/include/onnxruntime/core/session
 )
 
 target_link_libraries(linetime PRIVATE
@@ -74,10 +62,13 @@ target_link_libraries(linetime PRIVATE
     ggml
     ggml-base
     ggml-cpu
-    onnxruntime::onnxruntime
+    -Wl,--whole-archive
+    ${ORT_STATIC_LIBS}
+    -Wl,--no-whole-archive
     pthread
     dl
     m
+    z
 )
 
 target_compile_options(linetime PRIVATE -O3 -DNDEBUG -Wno-unused-result)

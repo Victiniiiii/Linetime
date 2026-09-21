@@ -26,7 +26,7 @@ else
     echo "[1/4] whisper.cpp static already built"
 fi
 
-echo "[2/4] Compiling linetime..."
+echo "[2/4] Compiling linetime (fully static ONNX Runtime)..."
 mkdir -p "$BUILD_STATIC/out"
 
 WHISPER_SRC="vendor/whisper.cpp/include"
@@ -35,8 +35,14 @@ GGML_STATIC="$BUILD_STATIC/ggml/src"
 WHISPER_STATIC="$BUILD_STATIC/src"
 ONNX_DIR="vendor/onnxruntime"
 
+# Collect all ONNX Runtime static libs
+ORT_LIBS=""
+for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
+    ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
+done
+
 g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
-    -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" -I"$ONNX_DIR/include" \
+    -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" -I"$ONNX_DIR/include/onnxruntime/core/session" \
     -o "$BUILD_STATIC/out/linetime" \
     src/main.cpp \
     src/audio.cpp \
@@ -49,10 +55,9 @@ g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
     "$GGML_STATIC/libggml.a" \
     "$GGML_STATIC/libggml-base.a" \
     "$GGML_STATIC/libggml-cpu.a" \
-    "$ONNX_DIR/lib/libonnxruntime.so" \
-    -Wl,-rpath,'$ORIGIN' \
+    $ORT_LIBS \
     -Wl,--allow-multiple-definition \
-    -lpthread -ldl -lm -lgomp
+    -lpthread -ldl -lm -lgomp -lz
 
 echo "[3/4] Packaging distribution..."
 rm -rf "$DIST_DIR"
@@ -60,12 +65,6 @@ mkdir -p "$DIST_DIR/models"
 
 # Binary
 cp "$BUILD_STATIC/out/linetime" "$DIST_DIR/"
-
-# ONNX Runtime shared libraries
-cp "$ONNX_DIR/lib/libonnxruntime.so.1.19.2" "$DIST_DIR/"
-ln -sf libonnxruntime.so.1.19.2 "$DIST_DIR/libonnxruntime.so.1"
-ln -sf libonnxruntime.so.1 "$DIST_DIR/libonnxruntime.so"
-cp "$ONNX_DIR/lib/libonnxruntime_providers_shared.so" "$DIST_DIR/" 2>/dev/null || true
 
 # ffmpeg
 if [ -f "$SCRIPT_DIR/ffmpeg" ]; then
