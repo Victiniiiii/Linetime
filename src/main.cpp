@@ -14,8 +14,9 @@ namespace fs = std::filesystem;
 
 void print_usage() {
     fprintf(stderr,
-        "linetime - Lyric-Audio Timestamp Aligner\n\n"
-        "Usage: linetime <audio_file> <lyrics_file> [options]\n\n"
+        "linetime v1.1 - Lyric-Audio Timestamp Aligner\n\n"
+        "Usage: linetime <audio_file> <lyrics_file> [options]\n"
+        "       cat lyrics.txt | linetime <audio_file> - [options]\n\n"
         "Options:\n"
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
         "  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)\n"

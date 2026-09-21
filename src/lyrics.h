@@ -19,6 +19,7 @@ struct LyricsDocument {
 };
 
 // Parse lyrics file, expanding Ref./Chorus markers
+// Use "-" as path to read from stdin
 LyricsDocument parse_lyrics(const std::string& path);
 
 // Get the plain text of all non-marker lines (for forced alignment input)

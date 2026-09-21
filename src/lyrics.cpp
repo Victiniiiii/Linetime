@@ -5,14 +5,22 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <memory>
 
 LyricsDocument parse_lyrics(const std::string& path) {
     LyricsDocument doc;
 
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        fprintf(stderr, "[lyrics] Failed to open %s\n", path.c_str());
-        return doc;
+    std::unique_ptr<std::istream> stream;
+    if (path == "-") {
+        stream = std::make_unique<std::istream>(std::cin.rdbuf());
+        fprintf(stderr, "[lyrics] Reading from stdin\n");
+    } else {
+        auto file = std::make_unique<std::ifstream>(path);
+        if (!file->is_open()) {
+            fprintf(stderr, "[lyrics] Failed to open %s\n", path.c_str());
+            return doc;
+        }
+        stream = std::move(file);
     }
 
     std::string line;
@@ -26,11 +34,10 @@ LyricsDocument parse_lyrics(const std::string& path) {
     };
     std::vector<RawLine> raw_lines;
 
-    while (std::getline(file, line)) {
+    while (std::getline(*stream, line)) {
         std::string stripped = utils::trim(line);
         raw_lines.push_back({line_num++, line, stripped});
     }
-    file.close();
 
     // Second pass: identify chorus blocks (lines between "Ref." markers)
     // A chorus block is defined as: lines that follow a "Ref." marker until the next marker
