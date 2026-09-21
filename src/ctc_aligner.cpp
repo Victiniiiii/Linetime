@@ -228,7 +228,7 @@ bool CTCAligner::init(const std::string& onnx_model_path,
         return false;
     }
     OrtStatus* s;
-    s = ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "sounddetect", &impl_->env);
+    s = ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "linetime", &impl_->env);
     if (s) { ort->ReleaseStatus(s); return false; }
     s = ort->CreateSessionOptions(&impl_->session_opts);
     if (s) { ort->ReleaseStatus(s); return false; }

@@ -1,0 +1,83 @@
+cmake_minimum_required(VERSION 3.14)
+project(linetime LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ---- Static whisper.cpp ----
+set(WHISPER_CPP_DIR "${CMAKE_SOURCE_DIR}/vendor/whisper.cpp")
+set(WHISPER_BUILD_DIR "${CMAKE_SOURCE_DIR}/build-static")
+
+if(NOT EXISTS "${WHISPER_BUILD_DIR}/src/libwhisper.a")
+    message(FATAL_ERROR "Build whisper.cpp first: mkdir -p build-static && cd build-static && cmake ../vendor/whisper.cpp -DBUILD_SHARED_LIBS=OFF && cmake --build . -j")
+endif()
+
+add_library(whisper STATIC IMPORTED)
+set_target_properties(whisper PROPERTIES
+    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/src/libwhisper.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${WHISPER_CPP_DIR}/src"
+)
+
+# Also need ggml static libs
+add_library(ggml STATIC IMPORTED)
+set_target_properties(ggml PROPERTIES
+    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml.a"
+)
+
+add_library(ggml-base STATIC IMPORTED)
+set_target_properties(ggml-base PROPERTIES
+    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml-base.a"
+)
+
+add_library(ggml-cpu STATIC IMPORTED)
+set_target_properties(ggml-cpu PROPERTIES
+    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml-cpu.a"
+)
+
+# ---- ONNX Runtime (shared, bundled) ----
+set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
+add_library(onnxruntime::onnxruntime SHARED IMPORTED)
+set_target_properties(onnxruntime::onnxruntime PROPERTIES
+    IMPORTED_LOCATION "${ONNXRUNTIME_DIR}/lib/libonnxruntime.so"
+    IMPORTED_NO_SONAME TRUE
+    INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_DIR}/include"
+)
+
+# ---- linetime executable ----
+
+add_executable(linetime
+    src/main.cpp
+    src/audio.cpp
+    src/lyrics.cpp
+    src/ctc_aligner.cpp
+    src/whisper_aligner.cpp
+    src/merger.cpp
+    src/lrc_writer.cpp
+)
+
+target_include_directories(linetime PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/vendor
+    ${WHISPER_CPP_DIR}/src
+    ${ONNXRUNTIME_DIR}/include
+)
+
+# Use rpath=$ORIGIN so bundled .so files are found next to the binary
+set_target_properties(linetime PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN"
+)
+
+target_link_libraries(linetime PRIVATE
+    whisper
+    ggml
+    ggml-base
+    ggml-cpu
+    onnxruntime::onnxruntime
+    pthread
+    dl
+    m
+)
+
+target_compile_options(linetime PRIVATE -O3 -DNDEBUG -Wno-unused-result)

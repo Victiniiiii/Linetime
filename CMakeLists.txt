@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(sounddetect LANGUAGES C CXX)
+project(linetime LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,9 +26,9 @@ set_target_properties(onnxruntime::onnxruntime PROPERTIES
 set(WHISPER_CPP_DIR "${CMAKE_SOURCE_DIR}/vendor/whisper.cpp")
 add_subdirectory("${WHISPER_CPP_DIR}" "${CMAKE_BINARY_DIR}/whisper.cpp" EXCLUDE_FROM_ALL)
 
-# ---- sounddetect executable ----
+# ---- linetime executable ----
 
-add_executable(sounddetect
+add_executable(linetime
     src/main.cpp
     src/audio.cpp
     src/lyrics.cpp
@@ -38,7 +38,7 @@ add_executable(sounddetect
     src/lrc_writer.cpp
 )
 
-target_include_directories(sounddetect PRIVATE
+target_include_directories(linetime PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/vendor
     ${AVCODEC_INCLUDE_DIRS}
@@ -48,7 +48,7 @@ target_include_directories(sounddetect PRIVATE
     ${ONNXRUNTIME_INCLUDE}
 )
 
-target_link_libraries(sounddetect PRIVATE
+target_link_libraries(linetime PRIVATE
     whisper
     ${AVCODEC_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
@@ -57,7 +57,7 @@ target_link_libraries(sounddetect PRIVATE
     onnxruntime::onnxruntime
 )
 
-target_compile_options(sounddetect PRIVATE
+target_compile_options(linetime PRIVATE
     ${AVCODEC_CFLAGS_OTHER}
     ${AVFORMAT_CFLAGS_OTHER}
     ${AVUTIL_CFLAGS_OTHER}
@@ -66,5 +66,5 @@ target_compile_options(sounddetect PRIVATE
 
 # Release optimization
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(sounddetect PRIVATE -O3 -DNDEBUG -Wno-unused-result)
+    target_compile_options(linetime PRIVATE -O3 -DNDEBUG -Wno-unused-result)
 endif()
