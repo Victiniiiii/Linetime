@@ -6,6 +6,13 @@
 #include <vector>
 #include <map>
 
+enum class Provider {
+    Auto,    // Detect best available (CUDA > CoreML > CPU)
+    CPU,     // CPU only
+    CUDA,    // NVIDIA GPU (Linux/Windows)
+    CoreML   // Apple GPU/ANE (macOS)
+};
+
 struct AlignedWord {
     std::string text;
     int start_frame;
@@ -35,9 +42,10 @@ public:
     CTCAligner();
     ~CTCAligner();
 
-    // Initialize with model paths
+    // Initialize with model paths and optional provider selection
     bool init(const std::string& onnx_model_path,
-              const std::string& tokenizer_path);
+              const std::string& tokenizer_path,
+              Provider provider = Provider::Auto);
 
     // Align audio to lyrics, returning per-line timestamps
     CTCAlignerResult align(const AudioBuffer& audio,

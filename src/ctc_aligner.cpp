@@ -219,8 +219,24 @@ static std::vector<float> boost_target_phonemes(
     return boosted;
 }
 
+static bool try_append_cuda(const OrtApi* ort, OrtSessionOptions* opts) {
+    OrtCUDAProviderOptions cuda_opts{};
+    cuda_opts.device_id = 0;
+    cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
+    cuda_opts.gpu_mem_limit = 8ULL * 1024 * 1024 * 1024;
+    cuda_opts.arena_extend_strategy = 1;
+    cuda_opts.do_copy_in_default_stream = 1;
+    OrtStatus* s = ort->SessionOptionsAppendExecutionProvider_CUDA(opts, &cuda_opts);
+    if (s) {
+        ort->ReleaseStatus(s);
+        return false;
+    }
+    return true;
+}
+
 bool CTCAligner::init(const std::string& onnx_model_path,
-                       const std::string& tokenizer_path) {
+                       const std::string& tokenizer_path,
+                       Provider provider) {
     ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
     if (!ort) { fprintf(stderr, "[ctc] Failed to get ONNX Runtime API\n"); return false; }
     if (!impl_->tokenizer.load(tokenizer_path)) {
@@ -234,19 +250,30 @@ bool CTCAligner::init(const std::string& onnx_model_path,
     if (s) { ort->ReleaseStatus(s); return false; }
     ort->SetIntraOpNumThreads(impl_->session_opts, 4);
 
-    OrtCUDAProviderOptions cuda_opts{};
-    cuda_opts.device_id = 0;
-    cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
-    cuda_opts.gpu_mem_limit = 8ULL * 1024 * 1024 * 1024;
-    cuda_opts.arena_extend_strategy = 1;
-    cuda_opts.do_copy_in_default_stream = 1;
-    s = ort->SessionOptionsAppendExecutionProvider_CUDA(impl_->session_opts, &cuda_opts);
-    if (s) {
-        fprintf(stderr, "[ctc] CUDA provider not available, using CPU: %s\n", ort->GetErrorMessage(s));
-        ort->ReleaseStatus(s);
-    } else {
-        fprintf(stderr, "[ctc] Using CUDA execution provider (GPU)\n");
+    // Append execution providers based on requested provider
+    const char* provider_name = "CPU";
+    if (provider == Provider::CUDA || provider == Provider::Auto) {
+        if (try_append_cuda(ort, impl_->session_opts)) {
+            provider_name = "CUDA";
+        } else if (provider == Provider::CUDA) {
+            fprintf(stderr, "[ctc] CUDA requested but not available\n");
+        }
     }
+    // CoreML is macOS-only, handled via build flags (ORT_COREML)
+#ifdef ORT_COREML
+    if (provider == Provider::CoreML || provider == Provider::Auto) {
+        if (provider_name == nullptr || strcmp(provider_name, "CPU") == 0) {
+            OrtStatus* cm = ort->SessionOptionsAppendExecutionProvider_CoreML(impl_->session_opts, 0);
+            if (cm) {
+                ort->ReleaseStatus(cm);
+            } else {
+                provider_name = "CoreML";
+            }
+        }
+    }
+#endif
+
+    fprintf(stderr, "[ctc] Execution provider: %s\n", provider_name);
 
     s = ort->CreateSession(impl_->env, onnx_model_path.c_str(), impl_->session_opts, &impl_->session);
     if (s) {

@@ -25,12 +25,19 @@ void print_usage() {
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --method <a|b|both>      Alignment method (default: a)\n"
+        "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
+        "  --provider <name>        Force provider: auto, cpu, cuda, coreml\n"
         "  --verbose                Print detailed alignment info\n"
         "  -h, --help               Show this help\n\n"
         "Methods:\n"
         "  a    CTC forced alignment only (MMS multilingual)\n"
         "  b    Whisper DTW alignment only\n"
-        "  both Hybrid: run both, merge best results\n"
+        "  both Hybrid: run both, merge best results\n\n"
+        "Providers (GPU acceleration):\n"
+        "  auto   Detect best available (CUDA > CoreML > CPU)\n"
+        "  cpu    CPU only\n"
+        "  cuda   NVIDIA GPU (Linux/Windows, requires CUDA build)\n"
+        "  coreml Apple GPU/ANE (macOS, requires CoreML build)\n"
     );
 }
 
@@ -49,6 +56,7 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = "models/tokenizer.json";
     std::string language = "auto";
     std::string method = "a";
+    std::string provider_str = "auto";
     bool verbose = false;
 
     for (int i = 1; i < argc; i++) {
@@ -67,6 +75,10 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) language = argv[++i];
         } else if (arg == "--method") {
             if (i + 1 < argc) method = argv[++i];
+        } else if (arg == "--gpu") {
+            provider_str = "auto";
+        } else if (arg == "--provider") {
+            if (i + 1 < argc) provider_str = argv[++i];
         } else if (arg == "--verbose") {
             verbose = true;
         } else if (arg == "-h" || arg == "--help") {
@@ -78,6 +90,13 @@ int main(int argc, char** argv) {
             lyrics_path = arg;
         }
     }
+
+    // Parse provider
+    Provider provider = Provider::Auto;
+    if (provider_str == "cpu") provider = Provider::CPU;
+    else if (provider_str == "cuda") provider = Provider::CUDA;
+    else if (provider_str == "coreml") provider = Provider::CoreML;
+    else provider = Provider::Auto;
 
     if (audio_path.empty() || lyrics_path.empty()) {
         fprintf(stderr, "Error: both audio and lyrics files are required\n");
@@ -94,7 +113,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Audio:   %s\n", audio_path.c_str());
     fprintf(stderr, "Lyrics:  %s\n", lyrics_path.c_str());
     fprintf(stderr, "Output:  %s\n", output_path.c_str());
-    fprintf(stderr, "Method:  %s\n\n", method.c_str());
+    fprintf(stderr, "Method:  %s\n", method.c_str());
+    fprintf(stderr, "Provider: %s\n\n", provider_str.c_str());
 
     // Step 1: Load audio
     fprintf(stderr, "[1/5] Loading audio...\n");
@@ -119,7 +139,7 @@ int main(int argc, char** argv) {
     if (method == "a" || method == "both") {
         fprintf(stderr, "[3/5] Running CTC forced alignment (MMS_FA)...\n");
         CTCAligner ctc;
-        if (ctc.init(model_a_path, tokenizer_path)) {
+        if (ctc.init(model_a_path, tokenizer_path, provider)) {
             CTCAlignerResult result = ctc.align(audio, lyrics);
             if (result.success) {
                 ctc_result = result.lines;

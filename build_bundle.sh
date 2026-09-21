@@ -7,9 +7,21 @@ cd "$SCRIPT_DIR"
 BUILD_STATIC="build-static"
 DIST_DIR="dist"
 NPROC=$(nproc)
+GPU_FLAG=""
 
 echo "=== linetime bundle build ==="
 echo ""
+
+# Detect GPU provider
+if [ -d "vendor/onnxruntime/lib" ] && ls vendor/onnxruntime/lib/*cuda* &>/dev/null 2>&1; then
+    echo "  Detected CUDA ONNX Runtime"
+    GPU_FLAG="-DORT_CUDA"
+elif [ -d "vendor/onnxruntime/lib" ] && ls vendor/onnxruntime/lib/*coreml* &>/dev/null 2>&1; then
+    echo "  Detected CoreML ONNX Runtime"
+    GPU_FLAG="-DORT_COREML"
+else
+    echo "  Using CPU-only ONNX Runtime"
+fi
 
 # Step 1: Build whisper.cpp as static library (if not already)
 if [ ! -f "$BUILD_STATIC/src/libwhisper.a" ]; then
@@ -42,6 +54,7 @@ for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
 done
 
 g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+    $GPU_FLAG \
     -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" -I"$ONNX_DIR/include/onnxruntime/core/session" \
     -o "$BUILD_STATIC/out/linetime" \
     src/main.cpp \
@@ -91,3 +104,4 @@ ldd "$DIST_DIR/linetime" 2>&1 | head -20
 echo ""
 echo "=== Usage ==="
 echo "  cd $DIST_DIR && ./linetime song.wav lyrics.txt --method a --model-a models/mms_multilingual.onnx --tokenizer models/mms_multilingual_tokenizer.json"
+echo "  GPU: ./linetime song.wav lyrics.txt --gpu"
