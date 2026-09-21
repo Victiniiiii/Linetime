@@ -14,8 +14,8 @@ namespace fs = std::filesystem;
 
 void print_usage() {
     fprintf(stderr,
-        "sounddetect - Lyric-Audio Timestamp Aligner\n\n"
-        "Usage: sounddetect <audio_file> <lyrics_file> [options]\n\n"
+        "linetime - Lyric-Audio Timestamp Aligner\n\n"
+        "Usage: linetime <audio_file> <lyrics_file> [options]\n\n"
         "Options:\n"
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
         "  --model-a <path>         MMS_FA ONNX model (default: models/mms_fa.onnx)\n"
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
         output_path = p.stem().string() + ".lrc";
     }
 
-    fprintf(stderr, "=== sounddetect ===\n");
+    fprintf(stderr, "=== linetime ===\n");
     fprintf(stderr, "Audio:   %s\n", audio_path.c_str());
     fprintf(stderr, "Lyrics:  %s\n", lyrics_path.c_str());
     fprintf(stderr, "Output:  %s\n", output_path.c_str());

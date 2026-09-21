@@ -1,12 +1,29 @@
+# Build artifacts
 build/
-models/*.onnx
-models/*.onnx.data
-models/*.bin
-vendor/onnxruntime/
-*.lrc
+build-static/
+dist/
 *.o
 *.a
 *.so
 *.so.*
-vendor/cuda/
+
+# Model files (download via download_models.sh)
+models/*.onnx
+models/*.onnx.data
+models/*.bin
+models/mms_config.json
+models/mms_vocab.json
+
+# ONNX Runtime vendor
+vendor/onnxruntime/
 vendor/onnxruntime-linux-x64-gpu-1.19.2/
+vendor/cuda/
+
+# Generated outputs
+*.lrc
+
+# Internal docs
+AGENTS.md
+
+# Example/test files
+examples/
