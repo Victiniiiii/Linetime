@@ -47,9 +47,11 @@ public:
               const std::string& tokenizer_path,
               Provider provider = Provider::Auto);
 
-    // Align audio to lyrics, returning per-line timestamps
+    // Align audio to lyrics, returning per-line timestamps.
+    // boost: non-blank logit boost (production default 5.0)
     CTCAlignerResult align(const AudioBuffer& audio,
-                           const LyricsDocument& lyrics);
+                           const LyricsDocument& lyrics,
+                           float boost = 5.0f);
 
 private:
     struct Impl;

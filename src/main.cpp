@@ -25,6 +25,7 @@ void print_usage() {
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --method <a|b|both>      Alignment method (default: a)\n"
+        "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
         "  --provider <name>        Force provider: auto, cpu, cuda, coreml\n"
         "  --verbose                Print detailed alignment info\n"
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
     std::string language = "auto";
     std::string method = "a";
     std::string provider_str = "auto";
+    float boost = 5.0f;
     bool verbose = false;
 
     for (int i = 1; i < argc; i++) {
@@ -75,6 +77,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) language = argv[++i];
         } else if (arg == "--method") {
             if (i + 1 < argc) method = argv[++i];
+        } else if (arg == "--boost") {
+            if (i + 1 < argc) boost = std::stof(argv[++i]);
         } else if (arg == "--gpu") {
             provider_str = "auto";
         } else if (arg == "--provider") {
@@ -140,7 +144,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[3/5] Running CTC forced alignment (MMS_FA)...\n");
         CTCAligner ctc;
         if (ctc.init(model_a_path, tokenizer_path, provider)) {
-            CTCAlignerResult result = ctc.align(audio, lyrics);
+            CTCAlignerResult result = ctc.align(audio, lyrics, boost);
             if (result.success) {
                 ctc_result = result.lines;
                 fprintf(stderr, "  CTC: %zu lines aligned\n", ctc_result.size());
@@ -157,7 +161,7 @@ int main(int argc, char** argv) {
     if (method == "b" || method == "both") {
         fprintf(stderr, "[4/5] Running Whisper DTW alignment...\n");
         WhisperAligner whisper;
-        if (whisper.init(model_b_path)) {
+        if (whisper.init(model_b_path, provider)) {
             CTCAlignerResult result = whisper.align(audio, lyrics, language);
             if (result.success) {
                 whisper_result = result.lines;

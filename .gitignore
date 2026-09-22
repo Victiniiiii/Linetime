@@ -20,10 +20,23 @@ models/mms_vocab.json
 
 # CUDA / old vendor dirs
 vendor/cuda/
+vendor/cuda-toolkit/
 vendor/onnxruntime-linux-x64-gpu-1.19.2/
+build-ort-gpu/
 
 # Internal docs
 AGENTS.md
 
 # Example/test files
 examples/
+
+# Build binary in root
+linetime
+
+# Python
+__pycache__/
+
+# Eval/utility scripts
+eval_gt.py
+extract_gt.py
+viz_gt.py

@@ -2,7 +2,7 @@
 
 #include "audio.h"
 #include "lyrics.h"
-#include "ctc_aligner.h"  // for AlignedLine
+#include "ctc_aligner.h"  // for Provider, AlignedLine
 #include <string>
 #include <vector>
 
@@ -11,7 +11,8 @@ public:
     WhisperAligner();
     ~WhisperAligner();
 
-    bool init(const std::string& model_path);
+    // Initialize with model path and optional provider (CPU/GPU)
+    bool init(const std::string& model_path, Provider provider = Provider::Auto);
 
     // Align audio to lyrics using whisper's DTW token timestamps
     CTCAlignerResult align(const AudioBuffer& audio,

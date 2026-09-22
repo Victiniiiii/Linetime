@@ -14,9 +14,18 @@ struct WhisperAligner::Impl {
 WhisperAligner::WhisperAligner() : impl_(new Impl()) {}
 WhisperAligner::~WhisperAligner() { delete impl_; }
 
-bool WhisperAligner::init(const std::string& model_path) {
+bool WhisperAligner::init(const std::string& model_path, Provider provider) {
     struct whisper_context_params cparams = whisper_context_default_params();
     cparams.flash_attn = false;
+
+    if (provider == Provider::CUDA || provider == Provider::Auto) {
+        cparams.use_gpu = true;
+        cparams.gpu_device = 0;
+        fprintf(stderr, "[whisper] Using GPU acceleration (CUDA)\n");
+    } else {
+        cparams.use_gpu = false;
+        fprintf(stderr, "[whisper] Using CPU\n");
+    }
 
     impl_->ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     if (!impl_->ctx) {
