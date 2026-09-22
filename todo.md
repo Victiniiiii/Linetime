@@ -11,6 +11,11 @@
 - Export to other formats (SRT, VTT)
 - Package managers (AUR, Homebrew)
 - Do we need more than one method?
-- Make this work with all main GPUs and auto detection (CUDA, CoreML, ROCm, etc.)
 - Make this work for all languages and alphabets
 - Fix Whisper GPU build (needs complete CUDA toolkit for nvcc; currently whisper.cpp CPU-only)
+
+## GPU Support
+- [x] Linux CUDA GPU build (ONNX Runtime 1.19.2 + CUDA 12.6)
+- [ ] Windows CUDA GPU build (CUDA in MSYS2 CI)
+- [ ] macOS CoreML GPU build (needs CoreML ONNX Runtime)
+- [ ] AMD ROCm support (via ONNX Runtime ROCm provider)

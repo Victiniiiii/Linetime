@@ -69,6 +69,89 @@ jobs:
           name: linetime-linux-x64
           path: linetime-linux-x64.tar.gz
 
+  build-linux-gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install CUDA 12 toolkit
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y cuda-toolkit-12-6
+
+      - name: Download ONNX Runtime GPU
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-gpu-1.19.2.tgz
+          tar xzf onnxruntime-linux-x64-gpu-1.19.2.tgz
+          mkdir -p vendor/onnxruntime-gpu
+          cp -r onnxruntime-linux-x64-gpu-1.19.2/* vendor/onnxruntime-gpu/
+
+      - name: Build whisper.cpp (static)
+        run: |
+          mkdir -p build-static
+          cd build-static
+          cmake ../vendor/whisper.cpp -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENMP=OFF
+          cmake --build . -j$(nproc)
+
+      - name: Build linetime (GPU)
+        run: |
+          WHISPER_SRC="vendor/whisper.cpp/include"
+          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
+          GGML_STATIC="build-static/ggml/src"
+          WHISPER_STATIC="build-static/src"
+          ONNX_GPU="vendor/onnxruntime-gpu"
+          CUDA_HOME="/usr/local/cuda"
+
+          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+            -DORT_CUDA \
+            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
+            -I"$ONNX_GPU/include/onnxruntime/core/session" \
+            -I"$CUDA_HOME/include" \
+            -o linetime \
+            src/main.cpp src/audio.cpp src/lyrics.cpp \
+            src/ctc_aligner.cpp src/whisper_aligner.cpp \
+            src/merger.cpp src/lrc_writer.cpp \
+            "$WHISPER_STATIC/libwhisper.a" \
+            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
+            -L"$ONNX_GPU/lib" -lonnxruntime -lonnxruntime_providers_cuda -lonnxruntime_providers_shared \
+            -Wl,-rpath,'$ORIGIN/lib' \
+            -Wl,--allow-multiple-definition \
+            -lpthread -ldl -lm -lgomp -lz
+
+      - name: Bundle GPU libraries
+        run: |
+          mkdir -p lib
+          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime.so* lib/
+          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_cuda.so* lib/
+          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_shared.so* lib/
+          # CUDA runtime libs
+          cp -L /usr/local/cuda/lib64/libcudart.so* lib/
+          cp -L /usr/local/cuda/lib64/libcublas.so* lib/ 2>/dev/null || true
+          cp -L /usr/local/cuda/lib64/libcublasLt.so* lib/ 2>/dev/null || true
+          cp -L /usr/local/cuda/lib64/libcurand.so* lib/ 2>/dev/null || true
+          cp -L /usr/local/cuda/lib64/libcufft.so* lib/ 2>/dev/null || true
+          # cuDNN from CUDA repo
+          cp -L /usr/local/cuda/lib64/libcudnn*.so* lib/ 2>/dev/null || true
+          echo "GPU libs:"
+          ls -lh lib/
+
+      - name: Verify
+        run: |
+          LD_LIBRARY_PATH=lib ./linetime --help
+
+      - name: Package
+        run: |
+          tar czf linetime-linux-x64-gpu.tar.gz linetime lib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-linux-x64-gpu
+          path: linetime-linux-x64-gpu.tar.gz
+
   build-macos:
     runs-on: macos-latest
     steps:
@@ -205,7 +288,7 @@ jobs:
           path: linetime-windows-x64.tar.gz
 
   release:
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-linux-gpu, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -215,6 +298,7 @@ jobs:
         with:
           files: |
             linetime-linux-x64/linetime-linux-x64.tar.gz
+            linetime-linux-x64-gpu/linetime-linux-x64-gpu.tar.gz
             linetime-macos-universal/linetime-macos-universal.tar.gz
             linetime-windows-x64/linetime-windows-x64.tar.gz
           generate_release_notes: true
