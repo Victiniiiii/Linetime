@@ -74,28 +74,6 @@ This produces a `dist/` directory containing the binary, ONNX Runtime shared lib
 
 Run `./download_models.sh` to fetch all models.
 
-## Project structure
-
-```
-linetime/
-├── CMakeLists.txt          # Main build (shared libs, ffmpeg)
-├── CMakeLists.static.txt   # Static whisper + bundled ONNX build
-├── build_bundle.sh         # Bundle distribution builder
-├── download_models.sh      # Model downloader
-├── src/
-│   ├── main.cpp            # CLI entry point
-│   ├── audio.cpp/h         # Audio loading (via ffmpeg)
-│   ├── ctc_aligner.cpp/h   # CTC forced alignment (ONNX Runtime)
-│   ├── whisper_aligner.cpp/h  # Whisper DTW alignment
-│   ├── lyrics.cpp/h        # Lyrics text parser
-│   ├── merger.cpp/h        # CTC + Whisper result merger
-│   ├── lrc_writer.cpp/h    # LRC file writer
-│   └── utils.h             # Math utilities
-└── vendor/
-    ├── json.hpp            # nlohmann/json
-    └── whisper.cpp/        # whisper.cpp (git submodule)
-```
-
 ## Requirements
 
 - C++17 compiler
@@ -106,4 +84,4 @@ linetime/
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+GNU General Public License v3.0, see [LICENSE](LICENSE).
