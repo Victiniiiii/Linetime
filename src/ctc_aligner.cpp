@@ -297,7 +297,12 @@ bool CTCAligner::init(const std::string& onnx_model_path,
 
     fprintf(stderr, "[ctc] Execution provider: %s\n", provider_name);
 
+    #ifdef _WIN32
+    std::wstring model_wpath(onnx_model_path.begin(), onnx_model_path.end());
+    s = ort->CreateSession(impl_->env, model_wpath.c_str(), impl_->session_opts, &impl_->session);
+#else
     s = ort->CreateSession(impl_->env, onnx_model_path.c_str(), impl_->session_opts, &impl_->session);
+#endif
     if (s) {
         fprintf(stderr, "[ctc] Failed to load model: %s\n", ort->GetErrorMessage(s));
         ort->ReleaseStatus(s); return false;

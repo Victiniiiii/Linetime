@@ -109,7 +109,7 @@ jobs:
           g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
             -DORT_CUDA \
             -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_GPU/include/onnxruntime/core/session" \
+            -I"$ONNX_GPU/include" \
             -I"$CUDA_HOME/include" \
             -o linetime \
             src/main.cpp src/audio.cpp src/lyrics.cpp \
@@ -195,7 +195,7 @@ jobs:
             "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
             -L"$ONNX_DIR/lib" -lonnxruntime \
             -Wl,-rpath,@loader_path \
-            -lpthread -lm -lz
+            -lpthread -lm -lz -framework Accelerate
 
       - name: Download ffmpeg
         run: |
