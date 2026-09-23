@@ -125,7 +125,7 @@ jobs:
       - name: Bundle GPU libraries
         run: |
           mkdir -p lib
-          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime.so.1.19.2 lib/
+          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime.so.1 lib/
           cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_cuda.so lib/
           cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_shared.so lib/
           # CUDA runtime libs - copy each SONAME exactly once (cp -L on .so* duplicates files)
@@ -133,7 +133,7 @@ jobs:
           cp -L /usr/local/cuda/lib64/libcublas.so.12 lib/ 2>/dev/null || true
           cp -L /usr/local/cuda/lib64/libcublasLt.so.12 lib/ 2>/dev/null || true
           cp -L /usr/local/cuda/lib64/libcurand.so.10 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcufft.so.10 lib/ 2>/dev/null || true
+          cp -L /usr/local/cuda/lib64/libcufft.so.11 lib/ 2>/dev/null || true
           cp -L /usr/local/cuda/lib64/libcudnn.so.9 lib/ 2>/dev/null || true
           echo "GPU libs:"
           du -sh lib
