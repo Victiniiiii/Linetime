@@ -167,6 +167,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_OPENMP=OFF \
+            -DGGML_METAL=OFF \
+            -DGGML_BLAS=OFF \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build . -j$(sysctl -n hw.ncpu)
 
@@ -268,7 +270,7 @@ jobs:
             src/ctc_aligner.cpp src/whisper_aligner.cpp \
             src/merger.cpp src/lrc_writer.cpp \
             "$WHISPER_STATIC/libwhisper.a" \
-            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
+            "$GGML_STATIC/ggml.a" "$GGML_STATIC/ggml-base.a" "$GGML_STATIC/ggml-cpu.a" \
             -L"$ONNX_DIR/lib" -l:onnxruntime.lib \
             -Wl,--allow-multiple-definition \
             -lpthread -lm -lz
