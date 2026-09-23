@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 
 void print_usage() {
     fprintf(stderr,
-        "linetime v1.1 - Lyric-Audio Timestamp Aligner\n\n"
+        "linetime v1.2 - Lyric-Audio Timestamp Aligner\n\n"
         "Usage: linetime <audio_file> <lyrics_file> [options]\n"
         "       cat lyrics.txt | linetime <audio_file> - [options]\n\n"
         "Options:\n"
@@ -43,6 +43,11 @@ void print_usage() {
 }
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-h" || a == "--help") { print_usage(); return 0; }
+    }
+
     if (argc < 3) {
         print_usage();
         return 1;
