@@ -170,22 +170,22 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build . -j$(sysctl -n hw.ncpu)
 
+      - name: Download ONNX Runtime (universal2)
+        run: |
+          curl -fSL -o onnxruntime-osx-universal2-1.19.2.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-osx-universal2-1.19.2.tgz
+          tar xzf onnxruntime-osx-universal2-1.19.2.tgz
+
       - name: Build linetime (universal)
         run: |
           WHISPER_SRC="vendor/whisper.cpp/include"
           WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
           GGML_STATIC="build-static/ggml/src"
           WHISPER_STATIC="build-static/src"
-          ONNX_DIR="vendor/onnxruntime"
-
-          ORT_LIBS=""
-          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
-            ORT_LIBS="$ORT_LIBS -Wl,-force_load,$lib"
-          done
+          ONNX_DIR="onnxruntime-osx-universal2-1.19.2"
 
           clang++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
             -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_DIR/include/onnxruntime/core/session" \
+            -I"$ONNX_DIR/include" \
             -arch arm64 -arch x86_64 \
             -o linetime-macos-universal \
             src/main.cpp src/audio.cpp src/lyrics.cpp \
@@ -193,13 +193,18 @@ jobs:
             src/merger.cpp src/lrc_writer.cpp \
             "$WHISPER_STATIC/libwhisper.a" \
             "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
-            $ORT_LIBS \
+            -L"$ONNX_DIR/lib" -lonnxruntime \
+            -Wl,-rpath,@loader_path \
             -lpthread -lm -lz
 
       - name: Download ffmpeg
         run: |
           brew install ffmpeg
           cp "$(which ffmpeg)" .
+
+      - name: Bundle ONNX Runtime dylib
+        run: |
+          cp onnxruntime-osx-universal2-1.19.2/lib/libonnxruntime.1.19.2.dylib .
 
       - name: Verify
         run: |
@@ -208,7 +213,7 @@ jobs:
 
       - name: Package
         run: |
-          tar czf linetime-macos-universal.tar.gz linetime-macos-universal ffmpeg
+          tar czf linetime-macos-universal.tar.gz linetime-macos-universal libonnxruntime.1.19.2.dylib ffmpeg
 
       - uses: actions/upload-artifact@v4
         with:
@@ -242,29 +247,29 @@ jobs:
             -DGGML_OPENMP=OFF
           cmake --build . -j$(nproc)
 
+      - name: Download ONNX Runtime
+        run: |
+          curl -fSL -o onnxruntime-win-x64-1.19.2.zip https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip
+          unzip -q onnxruntime-win-x64-1.19.2.zip
+
       - name: Build linetime
         run: |
           WHISPER_SRC="vendor/whisper.cpp/include"
           WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
           GGML_STATIC="build-static/ggml/src"
           WHISPER_STATIC="build-static/src"
-          ONNX_DIR="vendor/onnxruntime"
+          ONNX_DIR="onnxruntime-win-x64-1.19.2"
 
-          ORT_LIBS=""
-          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
-            ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
-          done
-
-          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
+          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result -D_stdcall= -DORT_DLL_IMPORT \
             -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_DIR/include/onnxruntime/core/session" \
+            -I"$ONNX_DIR/include" \
             -o linetime-windows-x64.exe \
             src/main.cpp src/audio.cpp src/lyrics.cpp \
             src/ctc_aligner.cpp src/whisper_aligner.cpp \
             src/merger.cpp src/lrc_writer.cpp \
             "$WHISPER_STATIC/libwhisper.a" \
             "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
-            $ORT_LIBS \
+            -L"$ONNX_DIR/lib" -l:onnxruntime.lib \
             -Wl,--allow-multiple-definition \
             -lpthread -lm -lz
 
@@ -274,13 +279,17 @@ jobs:
           unzip -q ffmpeg-release-essentials.zip
           cp ffmpeg-*-essentials_build/bin/ffmpeg.exe .
 
+      - name: Bundle ONNX Runtime DLL
+        run: |
+          cp onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll .
+
       - name: Verify
         run: |
           ./linetime-windows-x64.exe --help
 
       - name: Package
         run: |
-          tar czf linetime-windows-x64.tar.gz linetime-windows-x64.exe ffmpeg.exe
+          tar czf linetime-windows-x64.tar.gz linetime-windows-x64.exe onnxruntime.dll ffmpeg.exe
 
       - uses: actions/upload-artifact@v4
         with:
