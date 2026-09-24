@@ -4,7 +4,7 @@
 - Return completion percentage in stdout (JSON progress output)
 - Test with more languages and genres
 - Short-line merging (words split across lines by LRC)
-- Confidence-based line filtering (skip low-confidence results)
+- Confidence-based line filtering (skip low-confidence results) — DONE (`--min-confidence`)
 - Adjustable CTC boost per-language
 - LRC validation / repair tool
 - Export to other formats (SRT, VTT)
