@@ -25,6 +25,8 @@ void print_usage() {
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
+        "  --min-confidence <float> Drop lines with alignment confidence below\n"
+        "                           this value (0-1, default: 0)\n"
         "  --method <a|c>            Alignment method (default: a)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
@@ -66,6 +68,7 @@ int main(int argc, char** argv) {
     std::string provider_str = "auto";
     float boost = 5.0f;
     int lead_ms = 0;
+    float min_conf = 0.0f;
     bool verbose = false;
 
     for (int i = 1; i < argc; i++) {
@@ -94,6 +97,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) transcript_path = argv[++i];
         } else if (arg == "--lead") {
             if (i + 1 < argc) lead_ms = atoi(argv[++i]);
+        } else if (arg == "--min-confidence") {
+            if (i + 1 < argc) min_conf = std::stof(argv[++i]);
         } else if (arg == "--verbose") {
             verbose = true;
         } else if (arg == "-h" || arg == "--help") {
@@ -217,6 +222,28 @@ int main(int argc, char** argv) {
     if (final_result.empty()) {
         fprintf(stderr, "Error: no alignment results to write\n");
         return 1;
+    }
+
+    // Confidence-based filtering: drop low-confidence lines (blank paragraph
+    // separators are always kept).
+    if (min_conf > 0.0f) {
+        int dropped = 0;
+        std::vector<AlignedLine> kept;
+        for (const auto& line : final_result) {
+            if (!line.text.empty() && line.confidence < min_conf) {
+                dropped++;
+                continue;
+            }
+            kept.push_back(line);
+        }
+        if (kept.empty()) {
+            fprintf(stderr, "Error: --min-confidence %.2f dropped all lines\n", min_conf);
+            return 1;
+        }
+        if (dropped > 0)
+            fprintf(stderr, "  Dropped %d low-confidence line(s) (conf < %.2f)\n",
+                    dropped, min_conf);
+        final_result = kept;
     }
 
     // Step 5: Write LRC

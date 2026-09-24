@@ -58,6 +58,8 @@ Options:
   --tokenizer <path>       Tokenizer JSON
   --language <code>        Language hint for whisper (default: auto)
   --lead <ms>              Shift whisper timestamps earlier by ms (default: 0)
+  --min-confidence <float> Drop lines with alignment confidence below this
+                           value (0-1, default: 0)
   --method <a|c>           Alignment method (default: a)
   --verbose                Print detailed alignment info
   -h, --help               Show this help
