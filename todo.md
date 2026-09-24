@@ -7,6 +7,8 @@
 - Confidence-based line filtering (skip low-confidence results) — DONE (`--min-confidence`)
 - Adjustable CTC boost per-language
 - LRC validation / repair tool
+- Whisper-based lyrics reconstruction (typo fix + missing-section restore) — DONE (`--recover-missing`, step-8 whisper text on weak hint lines)
+- LRC validation / repair tool
 - Export to other formats (SRT, VTT)
 - Package managers (AUR, Homebrew)
 - Make this work for all languages and alphabets (non-Latin scripts: Korean, Russian)

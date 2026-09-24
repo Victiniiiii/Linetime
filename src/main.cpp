@@ -27,6 +27,9 @@ void print_usage() {
         "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
         "  --min-confidence <float> Drop lines with alignment confidence below\n"
         "                           this value (0-1, default: 0)\n"
+        "  --recover-missing       Re-emit sung sections the lyrics omit (e.g.\n"
+        "                           a non-repeated chorus). Off by default: whisper\n"
+        "                           hallucination chant-tails can be re-added.\n"
         "  --method <a|c>            Alignment method (default: a)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
@@ -70,6 +73,7 @@ int main(int argc, char** argv) {
     int lead_ms = 0;
     float min_conf = 0.0f;
     bool verbose = false;
+    bool recover_missing = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -101,6 +105,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) min_conf = std::stof(argv[++i]);
         } else if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--recover-missing") {
+            recover_missing = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             return 0;
@@ -185,7 +191,7 @@ int main(int argc, char** argv) {
         }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
-            ReconcileResult rec = reconcile_lyrics(lyrics, trans);
+            ReconcileResult rec = reconcile_lyrics(lyrics, trans, 0.5f, recover_missing);
             if (rec.success) {
                 // Convert ReconciledLine to AlignedLine (whisper timings)
                 for (const auto& rl : rec.lines) {
@@ -195,6 +201,7 @@ int main(int argc, char** argv) {
                     al.end_ms = std::max(0LL, (long long)rl.end_ms - lead_ms);
                     al.confidence = rl.confidence;
                     al.text = rl.text;
+                    al.align_text = rl.align_text;
                     transcribe_result.push_back(al);
                 }
                 fprintf(stderr, "  Reconciled: %zu lines\n", transcribe_result.size());
@@ -209,8 +216,8 @@ int main(int argc, char** argv) {
                     if (al.text.empty()) continue; // blank paragraph marker
                     LyricLine ll;
                     ll.index = (int)refined.lines.size();
-                    ll.text = al.text;
-                    ll.normalized = al.text;
+                    ll.text = al.align_text.empty() ? al.text : al.align_text;
+                    ll.normalized = ll.text;
                     ll.is_ref = false;
                     ll.is_expanded = false;
                     refined.lines.push_back(ll);

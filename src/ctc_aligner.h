@@ -28,6 +28,7 @@ struct AlignedLine {
     double end_ms;
     float confidence;
     std::string text;
+    std::string align_text; // hint spelling used for CTC alignment (may be empty)
     std::vector<AlignedWord> words;
 };
 

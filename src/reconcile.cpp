@@ -27,6 +27,13 @@ struct WWord {
     int seg;
 };
 
+// Whisper tokens that describe the audio rather than lyrics (hallucination markers)
+static inline bool is_whisper_marker(const std::string& w) {
+    std::string lo = utils::normalize(w);
+    return lo == "music" || lo == "applause" || lo == "laughing" ||
+           lo == "laughter" || lo == "applauding" || lo == "singing";
+}
+
 static std::vector<WWord> clean_whisper_words(const TranscriptionResult& whisper) {
     std::vector<WWord> out;
     int seg_i = 0;
@@ -63,7 +70,8 @@ static std::vector<WWord> clean_whisper_words(const TranscriptionResult& whisper
 // ---------------------------------------------------------------------------
 ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
                                  const TranscriptionResult& whisper,
-                                 float similarity_threshold) {
+                                 float similarity_threshold,
+                                 bool recover_missing) {
     ReconcileResult result;
     (void)similarity_threshold; // text always from hint; whisper only supplies timing
 
@@ -220,6 +228,7 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
             rl.start_ms = seg.start_ms;
             rl.end_ms = seg.end_ms;
             rl.from_hint = false;
+            rl.recovered = false;
             rl.confidence = 0.3f;
             result.lines.push_back(rl);
         }
@@ -274,29 +283,238 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
         }
     }
 
-    // 8) Build output lines
+    // 8) Build output lines. Reconstruct line text from the whisper words the
+    //    DP attached to it (from first..last confident match, including interior
+    //    words whisper heard but the hint spelled differently or dropped) —
+    //    this fixes typos and restores words. Only confident matches (sim>=0.5)
+    //    mark whisper coverage, so words the DP matched weakly to the wrong
+    //    line stay uncovered and can be re-emitted by the fill pass below.
+    std::vector<bool> covered(WN, false);
+    auto trim_space = [](std::string& s) {
+        size_t a = s.find_first_not_of(' '), b = s.find_last_not_of(' ');
+        s = (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+    };
+    result.lines.clear();
     for (size_t j = 0; j < N; j++) {
         ReconciledLine rl;
-        rl.text = hlines[j].text;
-        rl.from_hint = true;
-        if (lt[j].start_ms < 0) lt[j].start_ms = 0;
-        if (lt[j].end_ms < 0) lt[j].end_ms = lt[j].start_ms + 1000;
-        rl.start_ms = lt[j].start_ms;
-        rl.end_ms = lt[j].end_ms;
-        rl.confidence = matched[j] ? 0.8f : 0.4f;
-        result.lines.push_back(rl);
+        std::vector<int> anchors;
+        std::vector<int> idx = wmatch_idx[j];
+        for (size_t k = 0; k < idx.size(); k++)
+            if (wmatch_sim[j][k] >= 0.50) anchors.push_back(idx[k]);
+        std::sort(anchors.begin(), anchors.end());
+        if (matched[j]) {
+            // Hint text is trustworthy (high coverage against whisper): keep it
+            // verbatim — whisper's spelling of a well-matched line (e.g. a
+            // misheard vowel or a romanized name) is usually worse than the hint.
+            rl.text = hlines[j].text;
+            rl.align_text = hlines[j].text;
+            rl.from_hint = true;
+            rl.confidence = 0.8f;
+            rl.start_ms = lt[j].start_ms;
+            rl.end_ms = lt[j].end_ms;
+            if (rl.start_ms < 0) rl.start_ms = 0;
+            if (rl.end_ms < 0) rl.end_ms = rl.start_ms + 1000;
+            // only confident anchors mark whisper coverage
+            for (int k : anchors) covered[k] = true;
+        } else if (!anchors.empty() && lt[j].start_ms >= 0) {
+            int f = anchors.front(), l = anchors.back();
+            rl.start_ms = wwords[f].start_ms;
+            rl.end_ms = wwords[l].end_ms;
+            // Rebuild from whisper when the hint line is weak: fixes typos /
+            // dropped words. Include interior whisper words only when the
+            // resulting span is plausibly a single line.
+            std::string txt;
+            double span_ms = wwords[l].end_ms - wwords[f].start_ms;
+            bool include_interiors = span_ms <= (anchors.size() + 2) * 600.0;
+            int prev_k = -1;
+            for (int k = f; k <= l; k++) {
+                bool anchor = std::binary_search(anchors.begin(), anchors.end(), k);
+                if (is_whisper_marker(wwords[k].text)) continue;
+                if (!anchor) {
+                    if (!include_interiors) continue;
+                    if (prev_k < 0) continue;
+                    if (wwords[k].start_ms - wwords[prev_k].end_ms >= 900.0) continue;
+                }
+                txt += ' ';
+                txt += wwords[k].text;
+                prev_k = k;
+                covered[k] = true;
+            }
+            trim_space(txt);
+            rl.text = txt;
+            rl.align_text = hlines[j].text; // CTC anchors on hint spelling
+            rl.from_hint = false;
+            rl.confidence = 0.4f;
+            for (int k : anchors) covered[k] = true;
+        } else {
+            rl.text = hlines[j].text;
+            rl.align_text.clear();
+            rl.from_hint = true;
+            rl.confidence = 0.3f;
+            rl.start_ms = lt[j].start_ms;
+            rl.end_ms = lt[j].end_ms;
+            if (rl.start_ms < 0) rl.start_ms = 0;
+            if (rl.end_ms < 0) rl.end_ms = rl.start_ms + 1000;
+        }
+        result.lines.push_back(std::move(rl));
     }
 
-    // 9) Enforce monotonic non-decreasing times
-    std::vector<ReconciledLine> final_lines;
+    // 8.5) Recover sung regions the hint omitted entirely (e.g. a chorus the
+    //      lyrics file does not repeat) — OFF by default since whisper
+    //      hallucination chant-tails would otherwise be re-emitted as lyrics.
+    //      When enabled, whisper words that no hint line anchored form
+    //      uncovered runs; emit them as lines (mirroring the hint's own line
+    //      structure when the section repeats text the hint keeps).
+    if (recover_missing) {
+        auto flush = [&](int rs, int re) {
+            if (re < rs) return;
+            int n = re - rs + 1;
+            // only reconstructed sections worth filling: a removed chorus/verse,
+            // not mere word-gaps from imperfect DP matching
+            if (n < 6) return;
+            if (wwords[re].end_ms - wwords[rs].start_ms < 3000.0) return;
+            auto emit = [&](std::vector<int> words, int hint_line_idx) {
+                if ((int)words.size() < 2) return;
+                double avg = 0;
+                for (int k : words) avg += wwords[k].prob;
+                if (avg / words.size() < 0.45) return;
+                std::string txt;
+                for (int k : words) {
+                    if (is_whisper_marker(wwords[k].text)) continue;
+                    txt += ' ';
+                    txt += wwords[k].text;
+                }
+                trim_space(txt);
+                if (txt.empty()) return;
+                ReconciledLine rl;
+                rl.text = txt;
+                if (hint_line_idx >= 0 && hlines[hint_line_idx].text.size() > 0)
+                    rl.align_text = hlines[hint_line_idx].text; // CTC anchor
+                rl.start_ms = wwords[words.front()].start_ms;
+                rl.end_ms = wwords[words.back()].end_ms;
+                rl.from_hint = false;
+                rl.recovered = true;
+                rl.confidence = 0.5f; // recovered from audio, no hint anchor
+                result.lines.push_back(std::move(rl));
+            };
+            // Try to mirror the hint's own line structure onto this run: the
+            // run is usually a section the hint omitted but repeats verbatim
+            // elsewhere (chorus). A local monotonic DP maps run words -> hint
+            // words; segments ending on a hint-line boundary become lines, and
+            // each line reuses the hint line's text as its CTC alignment anchor.
+            std::vector<int> run_txt;
+            for (int k = rs; k <= re; k++) run_txt.push_back(k);
+            int RP = (int)run_txt.size();
+            const double LSKIPW = -0.35, LSKIPH = -0.50;
+            std::vector<std::vector<double>> sc(RP + 1, std::vector<double>(HW + 1, -1e18));
+            std::vector<std::vector<unsigned char>> mv(RP + 1, std::vector<unsigned char>(HW + 1, 0));
+            sc[0][0] = 0;
+            for (int j = 1; j <= (int)HW; j++) sc[0][j] = sc[0][j - 1] + LSKIPW;
+            for (int i = 1; i <= RP; i++) {
+                sc[i][0] = sc[i - 1][0] + LSKIPH;
+                mv[i][0] = 1;
+                for (int j = 1; j <= (int)HW; j++) {
+                    double sim = word_sim(wwords[run_txt[i - 1]].norm, hint_all[j - 1]);
+                    double diag = sc[i - 1][j - 1] + sim;
+                    double down = sc[i - 1][j] + LSKIPH;
+                    double right = sc[i][j - 1] + LSKIPW;
+                    if (diag >= down && diag >= right) { sc[i][j] = diag; mv[i][j] = 0; }
+                    else if (down >= right) { sc[i][j] = down; mv[i][j] = 1; }
+                    else { sc[i][j] = right; mv[i][j] = 2; }
+                }
+            }
+            // backtrack, tagging each run word with its hint line (or -1)
+            std::vector<int> tag(RP, -1);
+            {
+                int i = RP, j = (int)HW;
+                while (i > 0 && j > 0) {
+                    unsigned char m = mv[i][j];
+                    if (m == 0) {
+                        tag[i - 1] = hint_line[j - 1];
+                        i--; j--;
+                    } else if (m == 1) i--;
+                    else j--;
+                }
+            }
+            // keep mirror only for a coherent, reasonably-fitting region
+            int tagged = 0;
+            double acc = 0;
+            for (int i = 0; i < RP; i++) {
+                if (tag[i] >= 0) { tagged++; acc += 1.0; }
+            }
+            if (tagged >= std::min(RP, 3) && (double)tagged / RP >= 0.5) {
+                int hprev = -1;
+                std::vector<int> cur;
+                for (int i = 0; i < RP; i++) {
+                    int h = tag[i];
+                    if (h != hprev && !cur.empty()) { emit(cur, hprev); cur.clear(); }
+                    hprev = (h >= 0) ? h : hprev;
+                    cur.push_back(run_txt[i]);
+                }
+                if (!cur.empty()) emit(cur, hprev);
+                return;
+            }
+            // fallback: split at word gaps > 900ms => natural lyric boundaries
+            int gs = rs;
+            while (gs <= re) {
+                int ge = gs;
+                while (ge + 1 <= re &&
+                       wwords[ge + 1].start_ms - wwords[ge].end_ms < 900.0)
+                    ge++;
+                std::vector<int> grp;
+                for (int k = gs; k <= ge; k++) grp.push_back(k);
+                emit(grp, -1);
+                gs = ge + 1;
+            }
+        };
+        int run_start = -1;
+        for (int k = 0; k <= WN; k++) {
+            if (k < WN && !covered[k]) {
+                if (run_start < 0) run_start = k;
+            } else if (run_start >= 0) {
+                flush(run_start, k - 1);
+                run_start = -1;
+            }
+        }
+    }
+
+    // 9) Keep hint lines in their original (lyrics) order and enforce monotonic
+    //    non-decreasing times; recovered (fill) lines are inserted by time so
+    //    they never reorder the hint lyrics (whisper times on weak tail lines
+    //    would otherwise scramble order and break downstream alignment).
+    std::vector<ReconciledLine> base;
+    std::vector<ReconciledLine> recovered;
     for (size_t i = 0; i < result.lines.size(); i++) {
         ReconciledLine rl = result.lines[i];
+        if (rl.recovered) { recovered.push_back(std::move(rl)); continue; }
         if (rl.start_ms > rl.end_ms) std::swap(rl.start_ms, rl.end_ms);
-        if (!final_lines.empty() && rl.start_ms < final_lines.back().end_ms) {
-            rl.start_ms = final_lines.back().end_ms;
+        if (!base.empty() && rl.start_ms < base.back().end_ms) {
+            rl.start_ms = base.back().end_ms;
         }
         if (rl.end_ms < rl.start_ms) rl.end_ms = rl.start_ms;
-        final_lines.push_back(rl);
+        base.push_back(std::move(rl));
+    }
+    std::vector<ReconciledLine> final_lines;
+    final_lines.reserve(base.size() + recovered.size());
+    // merge recovered lines in time order
+    std::sort(recovered.begin(), recovered.end(),
+              [](const ReconciledLine& a, const ReconciledLine& b) {
+                  return a.start_ms < b.start_ms;
+              });
+    size_t bi = 0, ri = 0;
+    while (bi < base.size() || ri < recovered.size()) {
+        if (bi < base.size() && (ri >= recovered.size() ||
+                                 base[bi].start_ms <= recovered[ri].start_ms)) {
+            ReconciledLine rl = base[bi++];
+            if (!final_lines.empty() && rl.start_ms < final_lines.back().end_ms)
+                rl.start_ms = final_lines.back().end_ms;
+            final_lines.push_back(std::move(rl));
+        } else {
+            ReconciledLine rl = recovered[ri++];
+            if (!final_lines.empty() && rl.start_ms < final_lines.back().end_ms)
+                rl.start_ms = final_lines.back().end_ms;
+            final_lines.push_back(std::move(rl));
+        }
     }
 
     // 10) Paragraph breaks when gap large
@@ -311,6 +529,7 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
                 blank.start_ms = final_lines[i].end_ms;
                 blank.end_ms = final_lines[i].end_ms;
                 blank.from_hint = false;
+                blank.recovered = false;
                 blank.confidence = 0;
                 result.lines.push_back(blank);
             }
