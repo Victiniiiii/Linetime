@@ -7,6 +7,7 @@
 #include <string>
 #include <cmath>
 #include <tuple>
+#include <cstdio>
 
 // ---------------------------------------------------------------------------
 // Word similarity over normalized strings
@@ -220,20 +221,29 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
     int first_match = -1;
     for (size_t j = 0; j < N && first_match < 0; j++) if (matched[j]) first_match = (int)j;
     if (first_match < 0) {
-        // nothing trusted matched at all -> fall back to whisper segments
-        for (const auto& seg : whisper.segments) {
-            if (seg.words.empty()) continue;
-            ReconciledLine rl;
-            rl.text = seg.text;
-            rl.start_ms = seg.start_ms;
-            rl.end_ms = seg.end_ms;
-            rl.from_hint = false;
-            rl.recovered = false;
-            rl.confidence = 0.3f;
-            result.lines.push_back(rl);
+        // Whisper matched nothing confidently — i.e. the transcript is likely a
+        // hallucination (instrumental intro, chant loops, "subtitles by…" mode).
+        // Discarding the hint for whisper segments here is catastrophic: the
+        // authored lyrics *are* the authority, and our CTC refinement can align
+        // them to the audio directly (method-A quality). Emit the hint lines on
+        // a neutral linear spread over the whisper span and let CTC re-time.
+        fprintf(stderr, "  [reconcile] whisper unreliably matched no hint line; "
+                        "falling back to hint + CTC alignment\n");
+        double t0w = WN ? wwords.front().start_ms : 0.0;
+        double t1w = WN ? wwords.back().end_ms : 0.0;
+        if (t1w <= t0w) t1w = t0w + 1000.0;
+        double span = t1w - t0w;
+        for (size_t j = 0; j < N; j++) {
+            double f = (double)j / (double)std::max(N, (size_t)1);
+            double f2 = (double)(j + 1) / (double)std::max(N, (size_t)1);
+            lt[j].start_ms = t0w + f * span;
+            lt[j].end_ms = t0w + f2 * span;
+            matched[j] = false;
+            wmatch_idx[j].clear();
+            wmatch_sim[j].clear();
         }
-        result.success = true;
-        return result;
+        // skip fill (recovered) pass: whisper words are untrustworthy
+        recover_missing = false;
     }
 
     // interpolate leading unmatched
