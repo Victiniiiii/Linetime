@@ -27,6 +27,7 @@ void print_usage() {
         "  --model-c <path>         Whisper large model for STT (default: models/ggml-large-v3.bin)\n"
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
+        "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
         "  --method <a|b|c|both>    Alignment method (default: a)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
@@ -67,8 +68,10 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = "models/tokenizer.json";
     std::string language = "auto";
     std::string method = "a";
+    std::string transcript_path;
     std::string provider_str = "auto";
     float boost = 5.0f;
+    int lead_ms = 0;
     bool verbose = false;
 
     for (int i = 1; i < argc; i++) {
@@ -95,6 +98,10 @@ int main(int argc, char** argv) {
             provider_str = "auto";
         } else if (arg == "--provider") {
             if (i + 1 < argc) provider_str = argv[++i];
+        } else if (arg == "--transcript") {
+            if (i + 1 < argc) transcript_path = argv[++i];
+        } else if (arg == "--lead") {
+            if (i + 1 < argc) lead_ms = atoi(argv[++i]);
         } else if (arg == "--verbose") {
             verbose = true;
         } else if (arg == "-h" || arg == "--help") {
@@ -195,7 +202,13 @@ int main(int argc, char** argv) {
 
     if (method == "c") {
         fprintf(stderr, "[5/5] Running Whisper STT + hint reconciliation...\n");
-        TranscriptionResult trans = transcribe_audio(audio_path, model_c_path, language);
+        TranscriptionResult trans;
+        if (!transcript_path.empty()) {
+            fprintf(stderr, "  Loading cached transcript from %s\n", transcript_path.c_str());
+            trans = load_transcription_json(transcript_path);
+        } else {
+            trans = transcribe_audio(audio_path, model_c_path, language);
+        }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
             ReconcileResult rec = reconcile_lyrics(lyrics, trans);
@@ -204,8 +217,8 @@ int main(int argc, char** argv) {
                 for (const auto& rl : rec.lines) {
                     AlignedLine al;
                     al.line_index = 0; // will be sorted by time
-                    al.start_ms = rl.start_ms;
-                    al.end_ms = rl.end_ms;
+                    al.start_ms = std::max(0LL, (long long)rl.start_ms - lead_ms);
+                    al.end_ms = std::max(0LL, (long long)rl.end_ms - lead_ms);
                     al.confidence = rl.confidence;
                     al.text = rl.text;
                     transcribe_result.push_back(al);

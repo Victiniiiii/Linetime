@@ -30,3 +30,6 @@ TranscriptionResult transcribe_audio(const std::string& audio_path,
                                      const std::string& model_path,
                                      const std::string& language,
                                      int threads = 8);
+
+// Parse an existing whisper-cli -ojf JSON file (for testing/reuse)
+TranscriptionResult load_transcription_json(const std::string& json_path);

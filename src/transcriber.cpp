@@ -187,45 +187,18 @@ static bool is_word_boundary(const std::string& tok_text) {
     return !tok_text.empty() && (tok_text[0] == ' ' || tok_text == "[_BEG_]" || tok_text == "[_END_]" || tok_text == "[_PAD_]" || tok_text == "[_UNK_]" || tok_text == "[_MASK_]" || tok_text == "[_SOS_]" || tok_text == "[_EOS_]" || tok_text == "[_TT_]" || tok_text == "[_NO_TIMESTAMPS_]" || tok_text == "[_LANGUAGE_]" || tok_text == "[_TASK_]" || tok_text == "[_TRANSCRIBE_]" || tok_text == "[_TRANSLATE_]" || tok_text == "[_SOT_]" || tok_text == "[_EOT_]" || tok_text == "[_PAD_]" || tok_text == "[_SOT_PREV_]");
 }
 
-TranscriptionResult transcribe_audio(const std::string& audio_path,
-                                     const std::string& model_path,
-                                     const std::string& language,
-                                     int threads) {
+// Whisper control/special tokens: [\_BEG_], [\_TT_1499], etc.
+static bool is_special_token(const std::string& t) {
+    return t.size() >= 2 && t[0] == '[' && t[1] == '_';
+}
+
+// Parse a whisper-cli -ojf JSON file into a TranscriptionResult
+TranscriptionResult load_transcription_json(const std::string& json_path) {
     TranscriptionResult result;
 
-    // Build command
-    std::string tmp_base = "/tmp/linetime_transcribe_" + std::to_string(getpid());
-    std::string cmd = "LD_LIBRARY_PATH=dist/lib dist/bin/whisper-cli "
-        "-m " + model_path + " "
-        "-l " + language + " "
-        "-f " + audio_path + " "
-        "-ojf -of " + tmp_base + " "
-        "-t " + std::to_string(threads) + " "
-        "-np 2>&1";
-
-    fprintf(stderr, "[transcriber] Running: %s\n", cmd.c_str());
-
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        result.error = "Failed to run whisper-cli";
-        return result;
-    }
-
-    char buffer[4096];
-    std::string stderr_output;
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        stderr_output += buffer;
-    }
-    int status = pclose(pipe);
-    if (status != 0) {
-        result.error = "whisper-cli failed (exit " + std::to_string(status) + "): " + stderr_output;
-        return result;
-    }
-
-    std::string json_path = tmp_base + ".json";
     std::string json_content = read_file(json_path);
     if (json_content.empty()) {
-        result.error = "Failed to read JSON output: " + json_path;
+        result.error = "Failed to read JSON: " + json_path;
         return result;
     }
 
@@ -259,14 +232,7 @@ TranscriptionResult transcribe_audio(const std::string& audio_path,
             for (size_t ti = 0; ti < tokens.a.size(); ti++) {
                 const JsonValue& tok = tokens.a[ti];
                 std::string ttext = tok["text"].as_string();
-                if (ttext == "[_BEG_]" || ttext == "[_END_]" || ttext == "[_PAD_]" || 
-                    ttext == "[_UNK_]" || ttext == "[_MASK_]" || ttext == "[_SOS_]" || 
-                    ttext == "[_EOS_]" || ttext == "[_TT_]" || ttext == "[_NO_TIMESTAMPS_]" ||
-                    ttext == "[_LANGUAGE_]" || ttext == "[_TASK_]" || ttext == "[_TRANSCRIBE_]" ||
-                    ttext == "[_TRANSLATE_]" || ttext == "[_SOT_]" || ttext == "[_EOT_]" ||
-                    ttext == "[_SOT_PREV_]") {
-                    continue;
-                }
+                if (is_special_token(ttext)) continue;
                 WhisperWord w = token_to_word(tok);
                 if (word_tokens.empty() || is_word_boundary(ttext)) {
                     // New word
@@ -288,6 +254,60 @@ TranscriptionResult transcribe_audio(const std::string& audio_path,
         result.segments.push_back(std::move(segment));
     }
 
+    result.success = true;
+    return result;
+}
+
+TranscriptionResult transcribe_audio(const std::string& audio_path,
+                                     const std::string& model_path,
+                                     const std::string& language,
+                                     int threads) {
+    TranscriptionResult result;
+
+    // Build command
+    std::string tmp_base = "/tmp/linetime_transcribe_" + std::to_string(getpid());
+    std::string cmd = "LD_LIBRARY_PATH=dist/lib dist/bin/whisper-cli "
+        "-m " + model_path + " "
+        "-l " + language + " "
+        "-f " + audio_path + " "
+        "-ojf -of " + tmp_base + " "
+        "-t " + std::to_string(threads) + " "
+        "-ml 60 "
+        "-np 2>&1";
+
+    fprintf(stderr, "[transcriber] Running: %s\n", cmd.c_str());
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        result.error = "Failed to run whisper-cli";
+        return result;
+    }
+
+    char buffer[4096];
+    std::string stderr_output;
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        stderr_output += buffer;
+    }
+    int status = pclose(pipe);
+    if (status != 0) {
+        result.error = "whisper-cli failed (exit " + std::to_string(status) + "): " + stderr_output;
+        return result;
+    }
+
+    std::string json_path = tmp_base + ".json";
+
+    // Optional: cache the raw JSON transcript for debugging/iteration
+    const char* cache_dir = getenv("LTC_CACHE_DIR");
+    if (cache_dir && *cache_dir) {
+        std::string cache_path = std::string(cache_dir) + "/" +
+            fs::path(audio_path).stem().string() + ".json";
+        std::filesystem::copy_file(json_path, cache_path,
+                                   std::filesystem::copy_options::overwrite_existing);
+        fprintf(stderr, "[transcriber] Cached transcript -> %s\n", cache_path.c_str());
+    }
+
+    result = load_transcription_json(json_path);
+
     // Clean up temp files
     std::remove((tmp_base + ".json").c_str());
     std::remove((tmp_base + ".txt").c_str());
@@ -297,6 +317,5 @@ TranscriptionResult transcribe_audio(const std::string& audio_path,
     std::remove((tmp_base + ".wts").c_str());
     std::remove((tmp_base + ".lrc").c_str());
 
-    result.success = true;
     return result;
 }

@@ -253,13 +253,85 @@ inline std::string map_cp_to_ascii(uint32_t cp) {
     }
     // CJK / Hangul / other unsupported
     if (cp >= 0x3040 && cp <= 0x9FFF) return ""; // Hiragana/Katakana/CJK/Hangul
-    if (cp >= 0xAC00 && cp <= 0xD7AF) return ""; // Hangul syllables
-    if (cp >= 0x1100 && cp <= 0x11FF) return ""; // Hangul jamo
-    if (cp >= 0x3130 && cp <= 0x318F) return ""; // Hangul compat
+    if (cp >= 0x1100 && cp <= 0x11FF) return ""; // Hangul jamo (handled below)
+    if (cp >= 0x3130 && cp <= 0x318F) return ""; // Hangul compat (handled below)
+    if (cp >= 0xAC00 && cp <= 0xD7AF) return ""; // Hangul syllables (handled below)
     // Arabic, Hebrew, Thai, etc. — unsupported
     if (cp >= 0x0600 && cp <= 0x06FF) return "";
     if (cp >= 0x0900 && cp <= 0x097F) return "";
     if (cp >= 0x0E00 && cp <= 0x0E7F) return "";
+    return "";
+}
+
+// --- Revised Romanization of Hangul (deterministic, for matching) ---
+inline std::string romanize_hangul(uint32_t cp) {
+    // Jamo tables (index order: 초성, 중성, 종성)
+    static const char* cho[19] = {"g","kk","n","d","tt","r","m","b","pp","s","ss","","j","jj","c","k","t","p","h"};
+    static const char* jung[21] = {"a","ae","ya","yae","eo","e","yeo","ye","o","wa","wae","oe","yo","u","wo","we","wi","yu","eu","ui","i"};
+    static const char* jong[28] = {"","k","k","gs","n","nj","nh","t","l","lk","lm","lb","ls","lt","lp","lh","m","p","ps","t","t","ng","t","t","k","t","p","h"};
+
+    // Compat Jamo (U+3131..U+318E) -> romanize approximated by falling back to decomposition
+    if (cp >= 0x3131 && cp <= 0x318E) {
+        // Map a handful of common compat jamo directly
+        switch (cp) {
+            case 0x3131: return "g";  // ㄱ
+            case 0x3132: return "kk"; // ㄲ
+            case 0x3134: return "n";  // ㄴ
+            case 0x3137: return "d";  // ㄷ
+            case 0x3138: return "tt"; // ㄸ
+            case 0x3139: return "r";  // ㄹ
+            case 0x3141: return "m";  // ㅁ
+            case 0x3142: return "b";  // ㅂ
+            case 0x3143: return "pp"; // ㅃ
+            case 0x3145: return "s";  // ㅅ
+            case 0x3146: return "ss"; // ㅆ
+            case 0x3147: return "";   // ㅇ
+            case 0x3148: return "j";  // ㅈ
+            case 0x3149: return "jj"; // ㅉ
+            case 0x314A: return "c";  // ㅊ
+            case 0x314B: return "k";  // ㅋ
+            case 0x314C: return "t";  // ㅌ
+            case 0x314D: return "p";  // ㅍ
+            case 0x314E: return "h";  // ㅎ
+            case 0x314F: return "a";  // ㅏ
+            case 0x3150: return "ae"; // ㅐ
+            case 0x3151: return "ya"; // ㅑ
+            case 0x3152: return "yae";// ㅒ
+            case 0x3153: return "eo"; // ㅓ
+            case 0x3154: return "e";  // ㅔ
+            case 0x3155: return "yeo";// ㅕ
+            case 0x3156: return "ye"; // ㅖ
+            case 0x3157: return "o";  // ㅗ
+            case 0x3158: return "wa"; // ㅘ
+            case 0x3159: return "wae";// ㅙ
+            case 0x315A: return "oe"; // ㅚ
+            case 0x315B: return "yo"; // ㅛ
+            case 0x315C: return "u";  // ㅜ
+            case 0x315D: return "wo"; // ㅝ
+            case 0x315E: return "we"; // ㅞ
+            case 0x315F: return "wi"; // ㅟ
+            case 0x3160: return "yu"; // ㅠ
+            case 0x3161: return "eu"; // ㅡ
+            case 0x3162: return "ui"; // ㅢ
+            case 0x3163: return "i";  // ㅣ
+            default: return "";
+        }
+    }
+
+    // Precomposed syllables
+    if (cp >= 0xAC00 && cp <= 0xD7A3) {
+        uint32_t s = cp - 0xAC00;
+        uint32_t l = s / (21 * 28);
+        uint32_t v = (s % (21 * 28)) / 28;
+        uint32_t t = s % 28;
+        std::string out = cho[l];
+        out += jung[v];
+        out += jong[t];
+        return out;
+    }
+    // Standalone jamo (U+1100..U+11FF): approximate as leading consonant
+    if (cp >= 0x1100 && cp <= 0x1112) return cho[cp - 0x1100];
+    if (cp >= 0x1161 && cp <= 0x1175) return jung[cp - 0x1161];
     return "";
 }
 
@@ -298,6 +370,12 @@ inline std::string normalize(const std::string& s) {
         std::string mapped = map_cp_to_ascii(cp);
         if (!mapped.empty()) {
             for (char mc : mapped) out += (char)std::tolower((unsigned char)mc);
+        } else if (cp >= 0xAC00 && cp <= 0xD7AF) {
+            out += romanize_hangul(cp);
+        } else if (cp >= 0x1100 && cp <= 0x11FF) {
+            out += romanize_hangul(cp);
+        } else if (cp >= 0x3130 && cp <= 0x318F) {
+            out += romanize_hangul(cp);
         } else if (cp < 0x80) {
             // already handled
         } else {
