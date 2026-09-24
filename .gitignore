@@ -29,6 +29,8 @@ AGENTS.md
 
 # Example/test files
 examples/
+test/
+check/
 
 # Build binary in root
 linetime
@@ -40,5 +42,3 @@ __pycache__/
 eval_gt.py
 extract_gt.py
 viz_gt.py
-
-test/
