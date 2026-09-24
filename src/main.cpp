@@ -20,9 +20,9 @@ void print_usage() {
         "Options:\n"
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
         "  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)\n"
-        "  --model-a <path>         MMS_FA ONNX model (default: models/mms_fa.onnx)\n"
+        "  --model-a <path>         MMS_FA ONNX model (default: models/mms_multilingual.onnx)\n"
         "  --model-c <path>         Whisper large model for STT (default: models/ggml-large-v3.bin)\n"
-        "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
+        "  --tokenizer <path>       Tokenizer JSON (default: models/mms_multilingual_tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
         "  --min-confidence <float> Drop lines with alignment confidence below\n"
@@ -59,9 +59,9 @@ int main(int argc, char** argv) {
     std::string lyrics_path;
     std::string output_path;
     std::string ffmpeg_path;
-    std::string model_a_path = "models/mms_fa.onnx";
+    std::string model_a_path = "models/mms_multilingual.onnx";
     std::string model_c_path = "models/ggml-large-v3.bin";
-    std::string tokenizer_path = "models/tokenizer.json";
+    std::string tokenizer_path = "models/mms_multilingual_tokenizer.json";
     std::string language = "auto";
     std::string method = "a";
     std::string transcript_path;
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
             ReconcileResult rec = reconcile_lyrics(lyrics, trans);
             if (rec.success) {
-                // Convert ReconciledLine to AlignedLine
+                // Convert ReconciledLine to AlignedLine (whisper timings)
                 for (const auto& rl : rec.lines) {
                     AlignedLine al;
                     al.line_index = 0; // will be sorted by time
@@ -198,6 +198,52 @@ int main(int argc, char** argv) {
                     transcribe_result.push_back(al);
                 }
                 fprintf(stderr, "  Reconciled: %zu lines\n", transcribe_result.size());
+
+                // CTC timing refinement: MMS forced alignment on the reconciled
+                // text is a far more reliable timing oracle than whisper word
+                // starts (whisper marks first words of segments early). Use CTC
+                // times for every line it can align; keep whisper times for the
+                // rest.
+                LyricsDocument refined;
+                for (const auto& al : transcribe_result) {
+                    if (al.text.empty()) continue; // blank paragraph marker
+                    LyricLine ll;
+                    ll.index = (int)refined.lines.size();
+                    ll.text = al.text;
+                    ll.normalized = al.text;
+                    ll.is_ref = false;
+                    ll.is_expanded = false;
+                    refined.lines.push_back(ll);
+                }
+                refined.total_lines = (int)refined.lines.size();
+                if (!refined.lines.empty()) {
+                    CTCAligner ctc;
+                    if (ctc.init(model_a_path, tokenizer_path, provider)) {
+                        CTCAlignerResult ctc_aligned = ctc.align(audio, refined, boost);
+                        if (ctc_aligned.success &&
+                            ctc_aligned.lines.size() == refined.lines.size()) {
+                            size_t k = 0;
+                            int nref = 0;
+                            for (size_t i = 0; i < transcribe_result.size(); i++) {
+                                if (transcribe_result[i].text.empty()) continue;
+                                const auto& cl = ctc_aligned.lines[k++];
+                                if (cl.confidence > 0.10f && cl.start_ms >= 0) {
+                                    transcribe_result[i].start_ms =
+                                        std::max(0LL, (long long)cl.start_ms - lead_ms);
+                                    transcribe_result[i].end_ms =
+                                        std::max(0LL, (long long)cl.end_ms - lead_ms);
+                                    transcribe_result[i].confidence =
+                                        std::max(transcribe_result[i].confidence, cl.confidence);
+                                    nref++;
+                                }
+                            }
+                            fprintf(stderr, "  CTC refinement: %d/%zu lines re-timed\n",
+                                    nref, refined.lines.size());
+                        }
+                    } else {
+                        fprintf(stderr, "  CTC refinement skipped (model not found; pass --model-a)\n");
+                    }
+                }
             } else {
                 fprintf(stderr, "  Reconciliation failed: %s\n", rec.error.c_str());
             }

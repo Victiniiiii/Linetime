@@ -35,13 +35,15 @@ cmake --build . -j$(nproc)
   --tokenizer models/mms_multilingual_tokenizer.json
 ```
 
-**Method C (Whisper STT + hint correction):**
+**Method C (Whisper STT + hint correction + CTC timing):**
 ```bash
 ./linetime song.wav lyrics.txt --method c \
   --model-c models/ggml-large-v3.bin \
+  --model-a models/mms_multilingual.onnx \
+  --tokenizer models/mms_multilingual_tokenizer.json \
   --language <lang_code>
 ```
-Method C transcribes audio with Whisper large-v3, reconciles with your lyrics (fixes typos, organizes structure from audio), and outputs timed LRC.
+Method C transcribes audio with Whisper large-v3, reconciles with your lyrics (fixes typos, organizes structure from audio), then re-times every line it can with MMS CTC forced alignment — whisper timestamps are only used where CTC cannot align a line (e.g. typos). This removes whisper's segment-start word bias; measured acc@1s vs reference LRC: 1.00 on clean songs (8hfm, 3qz6, ihqs, 0iac, 9532), 0.91 on 88fx.
 
 > **Note:** Method C is anchored on whisper's own timestamps (correct for the audio). If your reference LRC uses a different sync convention, use `--lead <ms>` to shift output earlier.
 
