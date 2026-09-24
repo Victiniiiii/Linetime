@@ -1,8 +1,6 @@
 #include "audio.h"
 #include "lyrics.h"
 #include "ctc_aligner.h"
-#include "whisper_aligner.h"
-#include "merger.h"
 #include "lrc_writer.h"
 #include "transcriber.h"
 #include "reconcile.h"
@@ -23,12 +21,11 @@ void print_usage() {
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
         "  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)\n"
         "  --model-a <path>         MMS_FA ONNX model (default: models/mms_fa.onnx)\n"
-        "  --model-b <path>         Whisper GGML model (default: models/ggml-base.bin)\n"
         "  --model-c <path>         Whisper large model for STT (default: models/ggml-large-v3.bin)\n"
         "  --tokenizer <path>       Tokenizer JSON (default: models/tokenizer.json)\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
-        "  --method <a|b|c|both>    Alignment method (default: a)\n"
+        "  --method <a|c>            Alignment method (default: a)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
         "  --provider <name>        Force provider: auto, cpu, cuda, coreml\n"
@@ -36,9 +33,7 @@ void print_usage() {
         "  -h, --help               Show this help\n\n"
         "Methods:\n"
         "  a    CTC forced alignment only (MMS multilingual)\n"
-        "  b    Whisper DTW alignment only\n"
-        "  c    Whisper STT + hint reconciliation (re-derive structure, fix typos)\n"
-        "  both Hybrid: run both CTC and Whisper DTW, merge best results\n\n"
+        "  c    Whisper STT + hint reconciliation (re-derive structure, fix typos)\n\n"
         "Providers (GPU acceleration):\n"
         "  auto   Detect best available (CUDA > CoreML > CPU)\n"
         "  cpu    CPU only\n"
@@ -63,7 +58,6 @@ int main(int argc, char** argv) {
     std::string output_path;
     std::string ffmpeg_path;
     std::string model_a_path = "models/mms_fa.onnx";
-    std::string model_b_path = "models/ggml-base.bin";
     std::string model_c_path = "models/ggml-large-v3.bin";
     std::string tokenizer_path = "models/tokenizer.json";
     std::string language = "auto";
@@ -82,8 +76,6 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) ffmpeg_path = argv[++i];
         } else if (arg == "--model-a") {
             if (i + 1 < argc) model_a_path = argv[++i];
-        } else if (arg == "--model-b") {
-            if (i + 1 < argc) model_b_path = argv[++i];
         } else if (arg == "--model-c") {
             if (i + 1 < argc) model_c_path = argv[++i];
         } else if (arg == "--tokenizer") {
@@ -157,10 +149,9 @@ int main(int argc, char** argv) {
 
     // Step 3: Run alignment methods
     std::vector<AlignedLine> ctc_result;
-    std::vector<AlignedLine> whisper_result;
     std::vector<AlignedLine> transcribe_result;
 
-    if (method == "a" || method == "both") {
+    if (method == "a") {
         fprintf(stderr, "[3/5] Running CTC forced alignment (MMS_FA)...\n");
         CTCAligner ctc;
         if (ctc.init(model_a_path, tokenizer_path, provider)) {
@@ -174,30 +165,8 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr, "  Failed to init CTC aligner (model not found?)\n");
         }
-    } else if (method == "c") {
-        fprintf(stderr, "[3/5] Skipping CTC (method=c)\n");
     } else {
         fprintf(stderr, "[3/5] Skipping CTC (method=%s)\n", method.c_str());
-    }
-
-    if (method == "b" || method == "both") {
-        fprintf(stderr, "[4/5] Running Whisper DTW alignment...\n");
-        WhisperAligner whisper;
-        if (whisper.init(model_b_path, provider)) {
-            CTCAlignerResult result = whisper.align(audio, lyrics, language);
-            if (result.success) {
-                whisper_result = result.lines;
-                fprintf(stderr, "  Whisper: %zu lines aligned\n", whisper_result.size());
-            } else {
-                fprintf(stderr, "  Whisper failed: %s\n", result.error.c_str());
-            }
-        } else {
-            fprintf(stderr, "  Failed to init Whisper aligner (model not found?)\n");
-        }
-    } else if (method == "c") {
-        fprintf(stderr, "[4/5] Skipping Whisper DTW (method=c)\n");
-    } else {
-        fprintf(stderr, "[4/5] Skipping Whisper (method=%s)\n", method.c_str());
     }
 
     if (method == "c") {
@@ -232,20 +201,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Step 4: Merge / select result
-    fprintf(stderr, "[6/6] Merging and writing output...\n");
+    // Step 4: Select result
+    fprintf(stderr, "[6/6] Writing output...\n");
     std::vector<AlignedLine> final_result;
 
-    if (method == "both") {
-        final_result = merge_alignment(ctc_result, whisper_result);
-    } else if (method == "a") {
+    if (method == "a") {
         final_result = ctc_result;
-    } else if (method == "b") {
-        final_result = whisper_result;
     } else if (method == "c") {
         final_result = transcribe_result;
     } else {
-        final_result = whisper_result;
+        fprintf(stderr, "Error: unknown method '%s'\n", method.c_str());
+        return 1;
     }
 
     if (final_result.empty()) {

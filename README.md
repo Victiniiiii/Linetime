@@ -8,7 +8,6 @@ Automatic lyric-audio timestamp alignment. Takes an audio file and plain lyrics 
 2. Lyrics text is parsed into individual lines
 3. Alignment method:
    - **Method A (CTC):** MMS multilingual model forced-aligns each line to audio
-   - **Method B (Whisper DTW):** Whisper base model aligns via dynamic time warping
    - **Method C (Whisper STT + correction):** Whisper large-v3 transcribes audio, then reconciles with your input lyrics — **fixing typos, organizing line/paragraph structure from audio, and correcting text** while using whisper timestamps
 4. Results written as LRC with `[mm:ss.xx]` timestamps
 
@@ -36,13 +35,6 @@ cmake --build . -j$(nproc)
   --tokenizer models/mms_multilingual_tokenizer.json
 ```
 
-**Method B (Whisper DTW alignment):**
-```bash
-./linetime song.wav lyrics.txt --method b \
-  --model-b models/ggml-base.bin \
-  --language <lang_code>
-```
-
 **Method C (Whisper STT + hint correction):**
 ```bash
 ./linetime song.wav lyrics.txt --method c \
@@ -51,7 +43,7 @@ cmake --build . -j$(nproc)
 ```
 Method C transcribes audio with Whisper large-v3, reconciles with your lyrics (fixes typos, organizes structure from audio), and outputs timed LRC.
 
-> **Note:** Method C works best for songs without repeated sections. Repeated choruses in the hint lyrics can cause timestamp drift, as the word-level DTW alignment may match repeats to the wrong audio occurrence. For songs with repeated structure, Method A (CTC) is more reliable.
+> **Note:** Method C is anchored on whisper's own timestamps (correct for the audio). If your reference LRC uses a different sync convention, use `--lead <ms>` to shift output earlier.
 
 ## Usage
 
@@ -62,19 +54,17 @@ Options:
   -o, --output <path>      Output LRC file (default: <audio>.lrc)
   --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)
   --model-a <path>         MMS multilingual ONNX model
-  --model-b <path>         Whisper GGML model
   --model-c <path>         Whisper large model for STT (default: models/ggml-large-v3.bin)
   --tokenizer <path>       Tokenizer JSON
   --language <code>        Language hint for whisper (default: auto)
-  --method <a|b|c|both>    Alignment method (default: a)
+  --lead <ms>              Shift whisper timestamps earlier by ms (default: 0)
+  --method <a|c>           Alignment method (default: a)
   --verbose                Print detailed alignment info
   -h, --help               Show this help
 
 Methods:
   a     CTC forced alignment only (MMS multilingual)
-  b     Whisper DTW alignment only
-  c     Whisper STT + hint reconciliation (re-derive structure, fix typos, organize lines/paragraphs; best for non-repeating lyrics)
-  both  Hybrid: run both CTC and Whisper DTW, merge best results
+  c     Whisper STT + hint reconciliation (re-derive structure, fix typos, organize lines/paragraphs)
 ```
 
 ## Bundle build
@@ -94,8 +84,6 @@ This produces a `dist/` directory containing the binary, ONNX Runtime shared lib
 |-------|------|---------|
 | `mms_multilingual.onnx` | ~1.2GB | CTC forced alignment (Meta MMS) |
 | `mms_multilingual_tokenizer.json` | 293B | Tokenizer for CTC model |
-| `ggml-base.bin` | ~142MB | Whisper base model |
-| `ggml-small.bin` | ~466MB | Whisper small model (better accuracy) |
 | `ggml-large-v3.bin` | ~3.1GB | Whisper large-v3 (STT + hint reconciliation, method c) |
 
 Run `./download_models.sh` to fetch all models.

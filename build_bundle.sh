@@ -75,13 +75,7 @@ g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
     src/audio.cpp \
     src/lyrics.cpp \
     src/ctc_aligner.cpp \
-    src/whisper_aligner.cpp \
-    src/merger.cpp \
     src/lrc_writer.cpp \
-    "$WHISPER_STATIC/libwhisper.a" \
-    "$GGML_STATIC/libggml.a" \
-    "$GGML_STATIC/libggml-base.a" \
-    "$GGML_STATIC/libggml-cpu.a" \
     $ORT_LIBS \
     -Wl,--allow-multiple-definition \
     -lpthread -ldl -lm -lgomp -lz
@@ -121,7 +115,7 @@ else
 fi
 
 # Models
-for f in models/mms_multilingual.onnx models/mms_multilingual_tokenizer.json models/ggml-base.bin models/ggml-small.bin; do
+for f in models/mms_multilingual.onnx models/mms_multilingual_tokenizer.json models/ggml-large-v3.bin; do
     [ -f "$f" ] && cp "$f" "$DIST_DIR/models/"
 done
 
