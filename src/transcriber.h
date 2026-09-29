@@ -1,8 +1,10 @@
 #pragma once
 
+#include "audio.h"
+#include "ctc_aligner.h"
+
 #include <string>
 #include <vector>
-#include <optional>
 
 struct WhisperWord {
     std::string text;
@@ -25,11 +27,13 @@ struct TranscriptionResult {
     std::string error;
 };
 
-// Run whisper-cli and parse JSON output into word-level tokens
-TranscriptionResult transcribe_audio(const std::string& audio_path,
+TranscriptionResult transcribe_audio(const AudioBuffer& audio,
                                      const std::string& model_path,
+                                     const std::string& whisper_cli_path,
                                      const std::string& language,
-                                     int threads = 8);
+                                     Provider provider,
+                                     int threads = 16,
+                                     const std::vector<std::string>& environment_additions = {},
+                                     const std::string& cache_name = "");
 
-// Parse an existing whisper-cli -ojf JSON file (for testing/reuse)
 TranscriptionResult load_transcription_json(const std::string& json_path);

@@ -1,72 +1,83 @@
 #include "audio.h"
+#include "process.h"
+
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
-#include <algorithm>
-#include <array>
-#include <memory>
-#include <stdexcept>
+#include <limits>
+#include <string>
+#include <vector>
 
 static std::string find_ffmpeg() {
-    const char* paths[] = {
-        "ffmpeg",
-        "./ffmpeg",
-#ifdef _WIN32
-        ".\\ffmpeg.exe",
-        "C:\\ffmpeg\\bin\\ffmpeg.exe",
-#else
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-#endif
+    std::filesystem::path base(process::executable_directory());
+    std::vector<std::filesystem::path> candidates = {
+        base / "ffmpeg",
+        base / "ffmpeg.exe",
+        base / "bin" / "ffmpeg",
+        base / "bin" / "ffmpeg.exe"
     };
-    for (const char* p : paths) {
-#ifdef _WIN32
-        std::string cmd = std::string(p) + " -version >nul 2>nul";
-#else
-        std::string cmd = std::string(p) + " -version 2>/dev/null";
-#endif
-        if (system(cmd.c_str()) == 0) return p;
+    for (const auto& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate, error) && !error)
+            return candidate.string();
     }
-    return "";
+    return "ffmpeg";
 }
 
 AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path) {
     AudioBuffer result;
-
     std::string ffmpeg = ffmpeg_path.empty() ? find_ffmpeg() : ffmpeg_path;
     if (ffmpeg.empty()) {
         fprintf(stderr, "[audio] ffmpeg not found. Use --ffmpeg to specify the path.\n");
         return result;
     }
 
-    std::string cmd = ffmpeg + " -i \"" + path +
-        "\" -f f32le -ar 16000 -ac 1 -acodec pcm_f32le -hide_banner -loglevel error - 2>/dev/null";
-
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        fprintf(stderr, "[audio] Failed to run ffmpeg for %s\n", path.c_str());
+    std::vector<std::string> arguments = {
+        ffmpeg,
+        "-nostdin",
+        "-i", path,
+        "-f", "f32le",
+        "-ar", "16000",
+        "-ac", "1",
+        "-acodec", "pcm_f32le",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-"
+    };
+    process::Result execution = process::run(arguments);
+    if (!execution.started) {
+        fprintf(stderr, "[audio] Failed to run ffmpeg for %s: %s\n",
+                path.c_str(), execution.error.c_str());
+        return result;
+    }
+    if (execution.exit_code != 0) {
+        fprintf(stderr, "[audio] ffmpeg exited with code %d for %s\n",
+                execution.exit_code, path.c_str());
+        if (!execution.stderr_data.empty())
+            fprintf(stderr, "%s\n", execution.stderr_data.c_str());
+        return result;
+    }
+    if (!execution.error.empty()) {
+        fprintf(stderr, "[audio] ffmpeg output capture failed: %s\n",
+                execution.error.c_str());
+        return result;
+    }
+    if (execution.stdout_data.size() % sizeof(float) != 0) {
+        fprintf(stderr, "[audio] ffmpeg returned an incomplete float sample for %s\n",
+                path.c_str());
         return result;
     }
 
-    std::vector<float> all_samples;
-    constexpr size_t BUF_SAMPLES = 4096;
-    float buf[BUF_SAMPLES];
-
-    while (true) {
-        size_t n = fread(buf, sizeof(float), BUF_SAMPLES, pipe);
-        if (n == 0) break;
-        all_samples.insert(all_samples.end(), buf, buf + n);
+    size_t sample_count = execution.stdout_data.size() / sizeof(float);
+    if (sample_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        fprintf(stderr, "[audio] ffmpeg returned too many samples for %s\n", path.c_str());
+        return result;
     }
-
-    int rc = pclose(pipe);
-    if (rc != 0) {
-        fprintf(stderr, "[audio] ffmpeg exited with code %d for %s\n", rc, path.c_str());
-        all_samples.clear();
-    }
-
-    result.samples = std::move(all_samples);
+    result.samples.resize(sample_count);
+    if (sample_count > 0)
+        std::memcpy(result.samples.data(), execution.stdout_data.data(),
+                    sample_count * sizeof(float));
     result.sample_rate = 16000;
-    result.n_samples = result.samples.size();
+    result.n_samples = static_cast<int>(sample_count);
     result.duration_sec = static_cast<double>(result.n_samples) / 16000.0;
 
     fprintf(stderr, "[audio] Loaded %s: %d samples, %.1f sec, 16kHz mono\n",

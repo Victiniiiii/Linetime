@@ -4,16 +4,25 @@
 #include "lrc_writer.h"
 #include "transcriber.h"
 #include "reconcile.h"
+#include "process.h"
+#include "utils.h"
 
+#include <algorithm>
+#include <cerrno>
+#include <charconv>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
-#include <cstring>
-#include <string>
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
-// Convert whisper segments into LRC lines (method b). One line per non-empty
-// segment, whitespace/paragraph markers stripped.
 static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& trans) {
     std::vector<AlignedLine> out;
     for (const auto& seg : trans.segments) {
@@ -22,7 +31,6 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
         if (b == std::string::npos) continue;
         size_t e = text.find_last_not_of(" \t\r\n");
         text = text.substr(b, e - b + 1);
-        // Collapse padding/newlines left by whisper paragraph markers
         for (size_t i = 0; i < text.size(); i++) {
             if (text[i] == '\n' || text[i] == '\r' || text[i] == '\t') text[i] = ' ';
         }
@@ -30,14 +38,24 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
         std::string clean;
         clean.reserve(text.size());
         for (char c : text) {
-            if (c == ' ') { if (!in_space) { clean += ' '; in_space = true; } }
-            else { clean += c; in_space = false; }
+            if (c == ' ') {
+                if (!in_space) {
+                    clean += ' ';
+                    in_space = true;
+                }
+            } else {
+                clean += c;
+                in_space = false;
+            }
         }
         if (clean.empty()) continue;
 
         float conf_sum = 0.0f;
         int conf_n = 0;
-        for (const auto& w : seg.words) { conf_sum += w.prob; conf_n++; }
+        for (const auto& w : seg.words) {
+            conf_sum += w.prob;
+            conf_n++;
+        }
 
         AlignedLine al;
         al.line_index = (int)out.size();
@@ -51,10 +69,6 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
     return out;
 }
 
-// Re-time whisper-timed lines with MMS CTC forced alignment where confident.
-// CTC times are a far more reliable oracle than whisper word starts (whisper
-// marks first words of segments early). Keeps whisper times when CTC is
-// unavailable or not confident (>0.10). Returns number of re-timed lines.
 static int refine_with_ctc(std::vector<AlignedLine>& lines,
                            const AudioBuffer& audio,
                            float boost,
@@ -63,9 +77,9 @@ static int refine_with_ctc(std::vector<AlignedLine>& lines,
                            Provider provider,
                            int lead_ms) {
     LyricsDocument refined;
-    std::vector<size_t> keep_idx; // lines[] index for each refined lyric line
+    std::vector<size_t> keep_idx;
     for (size_t i = 0; i < lines.size(); i++) {
-        if (lines[i].text.empty()) continue; // blank paragraph marker
+        if (lines[i].text.empty()) continue;
         LyricLine ll;
         ll.index = (int)refined.lines.size();
         ll.text = lines[i].align_text.empty() ? lines[i].text : lines[i].align_text;
@@ -102,29 +116,148 @@ static int refine_with_ctc(std::vector<AlignedLine>& lines,
     return nref;
 }
 
+static bool parse_int_value(const std::string& text, int& value) {
+    if (text.empty()) return false;
+    long long parsed = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    auto result = std::from_chars(begin, end, parsed, 10);
+    if (result.ec != std::errc() || result.ptr != end ||
+        parsed < std::numeric_limits<int>::min() ||
+        parsed > std::numeric_limits<int>::max())
+        return false;
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+static bool parse_float_value(const std::string& text, float& value) {
+    if (text.empty() ||
+        std::isspace(static_cast<unsigned char>(text.front())) ||
+        std::isspace(static_cast<unsigned char>(text.back())))
+        return false;
+    errno = 0;
+    char* end = nullptr;
+    double parsed = std::strtod(text.c_str(), &end);
+    if (errno == ERANGE || end != text.c_str() + text.size() ||
+        !std::isfinite(parsed) || parsed < -std::numeric_limits<float>::max() ||
+        parsed > std::numeric_limits<float>::max())
+        return false;
+    value = static_cast<float>(parsed);
+    return std::isfinite(value);
+}
+
+static bool take_value(int argc, char** argv, int& index,
+                       const char* option, std::string& value) {
+    if (index + 1 >= argc) {
+        fprintf(stderr, "Error: %s requires a value\n", option);
+        return false;
+    }
+    value = argv[++index];
+    if (value.empty() || value[0] == '-') {
+        fprintf(stderr, "Error: %s requires a value\n", option);
+        return false;
+    }
+    return true;
+}
+
+static bool take_numeric_value(int argc, char** argv, int& index,
+                               const char* option, std::string& value) {
+    if (index + 1 >= argc || argv[index + 1][0] == '\0') {
+        fprintf(stderr, "Error: %s requires a value\n", option);
+        return false;
+    }
+    value = argv[++index];
+    return !value.empty();
+}
+
+static bool existing_file(const fs::path& path) {
+    std::error_code error;
+    return fs::is_regular_file(path, error) && !error;
+}
+
+static std::string first_existing(const fs::path& base,
+                                  const std::vector<fs::path>& relative_paths,
+                                  const std::string& fallback) {
+    for (const fs::path& relative : relative_paths) {
+        fs::path candidate = base / relative;
+        if (existing_file(candidate)) return candidate.string();
+    }
+    return fallback;
+}
+
+static std::string runtime_file(const fs::path& base, const char* relative) {
+    return (base / relative).string();
+}
+
+static std::string prepend_runtime_path(const std::vector<fs::path>& directories,
+                                        const char* variable) {
+    std::string value;
+#ifdef _WIN32
+    const char separator = ';';
+#else
+    const char separator = ':';
+#endif
+    const char* current = std::getenv(variable);
+    if (current) value = current;
+    for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
+        std::string directory = it->string();
+        if (directory.empty()) continue;
+        std::string combined = directory;
+        if (!value.empty()) combined += separator + value;
+        value = std::move(combined);
+    }
+    return value;
+}
+
+static std::vector<std::string> runtime_environment(const fs::path& base,
+                                                    const std::string& whisper_cli_path) {
+    std::vector<fs::path> directories;
+    directories.push_back(base / "lib");
+    fs::path whisper_path(whisper_cli_path);
+    if (whisper_path.has_parent_path()) {
+        fs::path parent = whisper_path.parent_path();
+        directories.push_back(parent / "lib");
+        if (parent.filename() == "bin")
+            directories.push_back(parent.parent_path() / "lib");
+    }
+
+#ifdef _WIN32
+    const char* variable = "PATH";
+#else
+#ifdef __APPLE__
+    const char* variable = "DYLD_LIBRARY_PATH";
+#else
+    const char* variable = "LD_LIBRARY_PATH";
+#endif
+#endif
+    std::string path_value = prepend_runtime_path(directories, variable);
+    if (path_value.empty()) return {};
+    return {std::string(variable) + "=" + path_value};
+}
+
 void print_usage() {
     fprintf(stderr,
-        "linetime v1.2 - Lyric-Audio Timestamp Aligner\n\n"
+        "linetime v1.3 - Lyric-Audio Timestamp Aligner\n\n"
         "Usage: linetime <audio_file> [lyrics_file] [options]\n"
         "       cat lyrics.txt | linetime <audio_file> - [options]\n"
         "       linetime <audio_file> [options]     (no lyrics -> method b)\n\n"
         "Options:\n"
         "  -o, --output <path>      Output LRC file (default: <audio>.lrc)\n"
-        "  --ffmpeg <path>          Path to ffmpeg binary (default: search PATH)\n"
-        "  --model-a <path>         MMS_FA ONNX model (default: models/mms_multilingual.onnx)\n"
-        "  --model-c <path>         Whisper large model for STT (default: models/ggml-large-v3.bin)\n"
-        "  --tokenizer <path>       Tokenizer JSON (default: models/mms_multilingual_tokenizer.json)\n"
+        "  --ffmpeg <path>          Path to ffmpeg binary\n"
+        "  --model-a <path>         MMS_FA ONNX model\n"
+        "  --model-c <path>         Whisper model for STT\n"
+        "  --tokenizer <path>       MMS_FA tokenizer JSON\n"
+        "  --whisper-cli <path>     Path to whisper-cli executable\n"
         "  --language <code>        Whisper language hint (default: auto)\n"
         "  --lead <ms>              Shift timestamps earlier by ms (default: 0)\n"
         "  --min-confidence <float> Drop lines with alignment confidence below\n"
         "                           this value (0-1, default: 0)\n"
-        "  --recover-missing       Re-emit sung sections the lyrics omit (e.g.\n"
-        "                           a non-repeated chorus). Off by default: whisper\n"
-        "                           hallucination chant-tails can be re-added.\n"
-        "  --method <a|b|c>          Alignment method (default: a, or b without lyrics)\n"
+        "  --recover-missing        Re-emit sung sections the lyrics omit\n"
+        "  --method <a|b|c>         Alignment method (default: a, or b without lyrics)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
         "  --provider <name>        Force provider: auto, cpu, cuda, coreml\n"
+        "  --transcript <path>      Load a cached whisper JSON transcript\n"
         "  --verbose                Print detailed alignment info\n"
         "  -h, --help               Show this help\n\n"
         "Methods:\n"
@@ -140,23 +273,14 @@ void print_usage() {
 }
 
 int main(int argc, char** argv) {
-    for (int i = 1; i < argc; i++) {
-        std::string a = argv[i];
-        if (a == "-h" || a == "--help") { print_usage(); return 0; }
-    }
-
-    if (argc < 3) {
-        print_usage();
-        return 1;
-    }
-
     std::string audio_path;
     std::string lyrics_path;
     std::string output_path;
     std::string ffmpeg_path;
-    std::string model_a_path = "models/mms_multilingual.onnx";
-    std::string model_c_path = "models/ggml-large-v3.bin";
-    std::string tokenizer_path = "models/mms_multilingual_tokenizer.json";
+    std::string whisper_cli_path;
+    std::string model_a_path;
+    std::string model_c_path;
+    std::string tokenizer_path;
     std::string language = "auto";
     std::string method = "a";
     bool method_explicit = false;
@@ -167,35 +291,55 @@ int main(int argc, char** argv) {
     float min_conf = 0.0f;
     bool verbose = false;
     bool recover_missing = false;
+    std::vector<std::string> positionals;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-o" || arg == "--output") {
-            if (i + 1 < argc) output_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), output_path)) return 1;
         } else if (arg == "--ffmpeg") {
-            if (i + 1 < argc) ffmpeg_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), ffmpeg_path)) return 1;
+        } else if (arg == "--whisper-cli") {
+            if (!take_value(argc, argv, i, arg.c_str(), whisper_cli_path)) return 1;
         } else if (arg == "--model-a") {
-            if (i + 1 < argc) model_a_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), model_a_path)) return 1;
         } else if (arg == "--model-c") {
-            if (i + 1 < argc) model_c_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), model_c_path)) return 1;
         } else if (arg == "--tokenizer") {
-            if (i + 1 < argc) tokenizer_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), tokenizer_path)) return 1;
         } else if (arg == "--language") {
-            if (i + 1 < argc) language = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), language)) return 1;
         } else if (arg == "--method") {
-            if (i + 1 < argc) { method = argv[++i]; method_explicit = true; }
+            if (!take_value(argc, argv, i, arg.c_str(), method)) return 1;
+            method_explicit = true;
         } else if (arg == "--boost") {
-            if (i + 1 < argc) boost = std::stof(argv[++i]);
+            std::string value;
+            if (!take_numeric_value(argc, argv, i, arg.c_str(), value) ||
+                !parse_float_value(value, boost) || boost < 0.0f) {
+                fprintf(stderr, "Error: --boost requires a finite non-negative number\n");
+                return 1;
+            }
         } else if (arg == "--gpu") {
             provider_str = "auto";
         } else if (arg == "--provider") {
-            if (i + 1 < argc) provider_str = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), provider_str)) return 1;
         } else if (arg == "--transcript") {
-            if (i + 1 < argc) transcript_path = argv[++i];
+            if (!take_value(argc, argv, i, arg.c_str(), transcript_path)) return 1;
         } else if (arg == "--lead") {
-            if (i + 1 < argc) lead_ms = atoi(argv[++i]);
+            std::string value;
+            if (!take_numeric_value(argc, argv, i, arg.c_str(), value) ||
+                !parse_int_value(value, lead_ms)) {
+                fprintf(stderr, "Error: --lead requires an integer\n");
+                return 1;
+            }
         } else if (arg == "--min-confidence") {
-            if (i + 1 < argc) min_conf = std::stof(argv[++i]);
+            std::string value;
+            if (!take_numeric_value(argc, argv, i, arg.c_str(), value) ||
+                !parse_float_value(value, min_conf) ||
+                min_conf < 0.0f || min_conf > 1.0f) {
+                fprintf(stderr, "Error: --min-confidence requires a number from 0 to 1\n");
+                return 1;
+            }
         } else if (arg == "--verbose") {
             verbose = true;
         } else if (arg == "--recover-missing") {
@@ -203,42 +347,76 @@ int main(int argc, char** argv) {
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             return 0;
-        } else if (audio_path.empty()) {
-            audio_path = arg;
-        } else if (lyrics_path.empty()) {
-            lyrics_path = arg;
+        } else if (arg == "-") {
+            if (positionals.size() >= 2) {
+                fprintf(stderr, "Error: too many positional arguments\n");
+                return 1;
+            }
+            positionals.push_back(arg);
+        } else if (!arg.empty() && arg[0] == '-') {
+            fprintf(stderr, "Error: unknown option '%s'\n", arg.c_str());
+            return 1;
+        } else {
+            if (positionals.size() >= 2) {
+                fprintf(stderr, "Error: too many positional arguments\n");
+                return 1;
+            }
+            positionals.push_back(arg);
         }
     }
 
-    // Parse provider
-    Provider provider = Provider::Auto;
-    if (provider_str == "cpu") provider = Provider::CPU;
-    else if (provider_str == "cuda") provider = Provider::CUDA;
-    else if (provider_str == "coreml") provider = Provider::CoreML;
-    else provider = Provider::Auto;
-
-    if (audio_path.empty()) {
+    if (positionals.empty()) {
         fprintf(stderr, "Error: an audio file is required\n");
         print_usage();
         return 1;
     }
+    if (positionals.size() > 1) lyrics_path = positionals[1];
+    audio_path = positionals[0];
 
-    // No lyrics -> audio-only transcription (method b). Explicit method a/c
-    // without lyrics is an error; method b ignores a lyrics file if given.
+    if (method != "a" && method != "b" && method != "c") {
+        fprintf(stderr, "Error: invalid method '%s' (expected a, b, or c)\n", method.c_str());
+        return 1;
+    }
+    Provider provider = Provider::Auto;
+    if (provider_str == "cpu") provider = Provider::CPU;
+    else if (provider_str == "cuda") provider = Provider::CUDA;
+    else if (provider_str == "coreml") provider = Provider::CoreML;
+    else if (provider_str == "auto") provider = Provider::Auto;
+    else {
+        fprintf(stderr, "Error: invalid provider '%s' (expected auto, cpu, cuda, or coreml)\n",
+                provider_str.c_str());
+        return 1;
+    }
+
     if (lyrics_path.empty()) {
         if (!method_explicit) {
             method = "b";
             fprintf(stderr, "No lyrics given - using method b (audio-only transcription)\n");
         } else if (method == "a" || method == "c") {
             fprintf(stderr, "Error: method '%s' requires a lyrics file\n", method.c_str());
-            fprintf(stderr, "       Omit the lyrics file (or pass --method b) for audio-only LRC\n");
             return 1;
         }
     } else if (method == "b") {
-        fprintf(stderr, "Method b ignores the lyrics file (%s); use method a/c for lyrics alignment\n",
-                lyrics_path.c_str());
-        lyrics_path.clear();
+        fprintf(stderr, "Error: method b does not accept a lyrics file\n");
+        return 1;
     }
+
+    fs::path executable_dir(process::executable_directory(argc > 0 ? argv[0] : nullptr));
+    if (model_a_path.empty())
+        model_a_path = runtime_file(executable_dir, "models/mms_multilingual.onnx");
+    if (model_c_path.empty())
+        model_c_path = runtime_file(executable_dir, "models/ggml-large-v3.bin");
+    if (tokenizer_path.empty())
+        tokenizer_path = runtime_file(executable_dir, "models/mms_multilingual_tokenizer.json");
+    if (ffmpeg_path.empty())
+        ffmpeg_path = first_existing(executable_dir,
+                                     {"ffmpeg", "ffmpeg.exe", "bin/ffmpeg", "bin/ffmpeg.exe"},
+                                     "ffmpeg");
+    if (whisper_cli_path.empty())
+        whisper_cli_path = first_existing(
+            executable_dir,
+            {"bin/whisper-cli", "bin/whisper-cli.exe", "whisper-cli", "whisper-cli.exe"},
+            "whisper-cli");
 
     if (output_path.empty()) {
         fs::path p(audio_path);
@@ -252,18 +430,18 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Method:  %s\n", method.c_str());
     fprintf(stderr, "Provider: %s\n\n", provider_str.c_str());
 
-    // Step 1: Load audio
     fprintf(stderr, "[1/5] Loading audio...\n");
+    utils::report_progress(5, "Loading audio");
     AudioBuffer audio = load_audio(audio_path, ffmpeg_path);
     if (audio.n_samples == 0) {
         fprintf(stderr, "Error: failed to load audio\n");
         return 1;
     }
 
-    // Step 2: Parse lyrics (audio-only mode has none)
     LyricsDocument lyrics;
     if (!lyrics_path.empty()) {
         fprintf(stderr, "[2/5] Parsing lyrics...\n");
+        utils::report_progress(12, "Parsing lyrics");
         lyrics = parse_lyrics(lyrics_path);
         if (lyrics.total_lines == 0) {
             fprintf(stderr, "Error: no lyrics lines found\n");
@@ -273,12 +451,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[2/5] Skipping lyrics (audio-only method b)\n");
     }
 
-    // Step 3: Run alignment methods
     std::vector<AlignedLine> ctc_result;
     std::vector<AlignedLine> transcribe_result;
 
     if (method == "a") {
         fprintf(stderr, "[3/5] Running CTC forced alignment (MMS_FA)...\n");
+        utils::report_progress(20, "Loading alignment model");
         CTCAligner ctc;
         if (ctc.init(model_a_path, tokenizer_path, provider)) {
             CTCAlignerResult result = ctc.align(audio, lyrics, boost);
@@ -297,21 +475,25 @@ int main(int argc, char** argv) {
 
     if (method == "c") {
         fprintf(stderr, "[5/5] Running Whisper STT + hint reconciliation...\n");
+        utils::report_progress(35, "Transcribing audio");
         TranscriptionResult trans;
         if (!transcript_path.empty()) {
             fprintf(stderr, "  Loading cached transcript from %s\n", transcript_path.c_str());
             trans = load_transcription_json(transcript_path);
         } else {
-            trans = transcribe_audio(audio_path, model_c_path, language);
+            std::vector<std::string> environment =
+                runtime_environment(executable_dir, whisper_cli_path);
+            trans = transcribe_audio(audio, model_c_path, whisper_cli_path, language,
+                                     provider, 16, environment,
+                                     fs::path(audio_path).stem().string());
         }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
             ReconcileResult rec = reconcile_lyrics(lyrics, trans, 0.5f, recover_missing);
             if (rec.success) {
-                // Convert ReconciledLine to AlignedLine (whisper timings)
                 for (const auto& rl : rec.lines) {
                     AlignedLine al;
-                    al.line_index = 0; // will be sorted by time
+                    al.line_index = 0;
                     al.start_ms = std::max(0LL, (long long)rl.start_ms - lead_ms);
                     al.end_ms = std::max(0LL, (long long)rl.end_ms - lead_ms);
                     al.confidence = rl.confidence;
@@ -320,16 +502,13 @@ int main(int argc, char** argv) {
                     transcribe_result.push_back(al);
                 }
                 fprintf(stderr, "  Reconciled: %zu lines\n", transcribe_result.size());
+                utils::report_progress(75, "Reconciling lyrics");
 
-                // CTC timing refinement: MMS forced alignment on the reconciled
-                // text is a far more reliable timing oracle than whisper word
-                // starts (whisper marks first words of segments early). Use CTC
-                // times for every line it can align; keep whisper times for the
-                // rest.
                 int nref = refine_with_ctc(transcribe_result, audio, boost,
                                            model_a_path, tokenizer_path, provider, lead_ms);
                 if (nref > 0)
                     fprintf(stderr, "  CTC refinement: %d/%zu lines re-timed\n", nref, transcribe_result.size());
+                utils::report_progress(85, "Refining timings");
             } else {
                 fprintf(stderr, "  Reconciliation failed: %s\n", rec.error.c_str());
             }
@@ -340,47 +519,45 @@ int main(int argc, char** argv) {
 
     if (method == "b") {
         fprintf(stderr, "[3/5] Running Whisper STT (audio-only method b)...\n");
+        utils::report_progress(20, "Transcribing audio");
         TranscriptionResult trans;
         if (!transcript_path.empty()) {
             fprintf(stderr, "  Loading cached transcript from %s\n", transcript_path.c_str());
             trans = load_transcription_json(transcript_path);
         } else {
-            trans = transcribe_audio(audio_path, model_c_path, language);
+            std::vector<std::string> environment =
+                runtime_environment(executable_dir, whisper_cli_path);
+            trans = transcribe_audio(audio, model_c_path, whisper_cli_path, language,
+                                     provider, 16, environment,
+                                     fs::path(audio_path).stem().string());
         }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
             transcribe_result = segments_to_lines(trans);
             fprintf(stderr, "  Segments -> %zu LRC lines\n", transcribe_result.size());
+            utils::report_progress(75, "Timing transcribed lines");
             if (!transcribe_result.empty()) {
                 int nref = refine_with_ctc(transcribe_result, audio, boost,
                                            model_a_path, tokenizer_path, provider, lead_ms);
                 fprintf(stderr, "  CTC refinement: %d/%zu lines re-timed\n", nref, transcribe_result.size());
+                utils::report_progress(85, "Refining timings");
             }
         } else {
             fprintf(stderr, "  Transcription failed: %s\n", trans.error.c_str());
         }
     }
 
-    // Step 4: Select result
     fprintf(stderr, "[6/6] Writing output...\n");
+    utils::report_progress(90, "Writing output");
     std::vector<AlignedLine> final_result;
-
-    if (method == "a") {
-        final_result = ctc_result;
-    } else if (method == "c" || method == "b") {
-        final_result = transcribe_result;
-    } else {
-        fprintf(stderr, "Error: unknown method '%s'\n", method.c_str());
-        return 1;
-    }
+    if (method == "a") final_result = ctc_result;
+    else if (method == "c" || method == "b") final_result = transcribe_result;
 
     if (final_result.empty()) {
         fprintf(stderr, "Error: no alignment results to write\n");
         return 1;
     }
 
-    // Confidence-based filtering: drop low-confidence lines (blank paragraph
-    // separators are always kept).
     if (min_conf > 0.0f) {
         int dropped = 0;
         std::vector<AlignedLine> kept;
@@ -401,14 +578,13 @@ int main(int argc, char** argv) {
         final_result = kept;
     }
 
-    // Step 5: Write LRC
     bool ok = write_lrc(output_path, final_result);
     if (!ok) {
         fprintf(stderr, "Error: failed to write LRC file\n");
         return 1;
     }
 
-    // Print summary
+    utils::report_progress(100, "Done");
     fprintf(stderr, "\n=== Done ===\n");
     fprintf(stderr, "Output: %s\n", output_path.c_str());
     if (verbose) {

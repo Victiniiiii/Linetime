@@ -1,74 +1,104 @@
 cmake_minimum_required(VERSION 3.14)
-project(linetime LANGUAGES C CXX)
+project(linetime_static LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ---- Static whisper.cpp ----
-set(WHISPER_CPP_DIR "${CMAKE_SOURCE_DIR}/vendor/whisper.cpp")
-set(WHISPER_BUILD_DIR "${CMAKE_SOURCE_DIR}/build-static")
-
-if(NOT EXISTS "${WHISPER_BUILD_DIR}/src/libwhisper.a")
-    message(FATAL_ERROR "Build whisper.cpp first: mkdir -p build-static && cd build-static && cmake ../vendor/whisper.cpp -DBUILD_SHARED_LIBS=OFF && cmake --build . -j")
-endif()
-
-add_library(whisper STATIC IMPORTED)
-set_target_properties(whisper PROPERTIES
-    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/src/libwhisper.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${WHISPER_CPP_DIR}/src"
-)
-
-add_library(ggml STATIC IMPORTED)
-set_target_properties(ggml PROPERTIES
-    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml.a"
-)
-
-add_library(ggml-base STATIC IMPORTED)
-set_target_properties(ggml-base PROPERTIES
-    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml-base.a"
-)
-
-add_library(ggml-cpu STATIC IMPORTED)
-set_target_properties(ggml-cpu PROPERTIES
-    IMPORTED_LOCATION "${WHISPER_BUILD_DIR}/ggml/src/libggml-cpu.a"
-)
-
-# ---- ONNX Runtime (static, no .so needed) ----
-set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
-file(GLOB ORT_STATIC_LIBS "${ONNXRUNTIME_DIR}/lib/*.a")
-
-# ---- linetime executable ----
-
-add_executable(linetime
+set(LINETIME_SOURCES
     src/main.cpp
     src/audio.cpp
     src/lyrics.cpp
     src/ctc_aligner.cpp
-    src/whisper_aligner.cpp
-    src/merger.cpp
     src/lrc_writer.cpp
+    src/transcriber.cpp
+    src/reconcile.cpp
+    src/process.cpp
 )
 
+set(LINETIME_ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime" CACHE PATH
+    "ONNX Runtime package directory")
+get_filename_component(LINETIME_ONNXRUNTIME_DIR "${LINETIME_ONNXRUNTIME_DIR}"
+                       ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+
+set(LINETIME_ONNXRUNTIME_INCLUDE_DIRS "")
+foreach(candidate
+    "${LINETIME_ONNXRUNTIME_DIR}/include"
+    "${LINETIME_ONNXRUNTIME_DIR}/include/onnxruntime/core/session")
+    if(IS_DIRECTORY "${candidate}")
+        list(APPEND LINETIME_ONNXRUNTIME_INCLUDE_DIRS "${candidate}")
+    endif()
+endforeach()
+if(NOT LINETIME_ONNXRUNTIME_INCLUDE_DIRS)
+    message(FATAL_ERROR "ONNX Runtime headers were not found in ${LINETIME_ONNXRUNTIME_DIR}")
+endif()
+
+file(GLOB LINETIME_ORT_STATIC_LIBRARIES "${LINETIME_ONNXRUNTIME_DIR}/lib/*.a")
+if(NOT LINETIME_ORT_STATIC_LIBRARIES)
+    message(FATAL_ERROR "Static ONNX Runtime libraries were not found in ${LINETIME_ONNXRUNTIME_DIR}/lib")
+endif()
+
+find_package(Threads REQUIRED)
+find_package(ZLIB)
+set(LINETIME_SYSTEM_LIBRARIES Threads::Threads ${CMAKE_DL_LIBS})
+if(UNIX)
+    list(APPEND LINETIME_SYSTEM_LIBRARIES m)
+endif()
+if(ZLIB_FOUND AND NOT WIN32)
+    list(APPEND LINETIME_SYSTEM_LIBRARIES ZLIB::ZLIB)
+endif()
+
+add_executable(linetime ${LINETIME_SOURCES})
 target_include_directories(linetime PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/vendor
-    ${WHISPER_CPP_DIR}/src
-    ${ONNXRUNTIME_DIR}/include/onnxruntime/core/session
-)
-
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/vendor"
+    ${LINETIME_ONNXRUNTIME_INCLUDE_DIRS})
 target_link_libraries(linetime PRIVATE
-    whisper
-    ggml
-    ggml-base
-    ggml-cpu
     -Wl,--whole-archive
-    ${ORT_STATIC_LIBS}
+    ${LINETIME_ORT_STATIC_LIBRARIES}
     -Wl,--no-whole-archive
-    pthread
-    dl
-    m
-    z
-)
+    ${LINETIME_SYSTEM_LIBRARIES})
+if(UNIX AND NOT APPLE)
+    target_link_options(linetime PRIVATE -Wl,--allow-multiple-definition)
+endif()
+set_target_properties(linetime PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin")
+target_compile_options(linetime PRIVATE
+    $<$<CONFIG:Release>:-O3>
+    $<$<CONFIG:Release>:-DNDEBUG>
+    -Wno-unused-result)
 
-target_compile_options(linetime PRIVATE -O3 -DNDEBUG -Wno-unused-result)
+set(LINETIME_WHISPER_DIR "${CMAKE_SOURCE_DIR}/vendor/whisper.cpp" CACHE PATH
+    "whisper.cpp source directory")
+get_filename_component(LINETIME_WHISPER_DIR "${LINETIME_WHISPER_DIR}"
+                       ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+if(NOT EXISTS "${LINETIME_WHISPER_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "whisper.cpp was not found in ${LINETIME_WHISPER_DIR}")
+endif()
+set(WHISPER_BUILD_EXAMPLES ON CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_COMMON_FFMPEG OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+# See CMakeLists.txt: -march=native makes a release SIGILL on older CPUs.
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+if(APPLE)
+    set(GGML_METAL OFF CACHE BOOL "" FORCE)
+    set(GGML_BLAS OFF CACHE BOOL "" FORCE)
+endif()
+add_subdirectory("${LINETIME_WHISPER_DIR}" "${CMAKE_BINARY_DIR}/whisper" EXCLUDE_FROM_ALL)
+if(NOT TARGET whisper-cli)
+    message(FATAL_ERROR "whisper-cli target was not created")
+endif()
+set_target_properties(whisper-cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin")

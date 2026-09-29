@@ -1,136 +1,161 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="${LINETIME_BUNDLE_BUILD_DIR:-${ROOT_DIR}/build-bundle}"
+DIST_DIR="${LINETIME_DIST_DIR:-${ROOT_DIR}/dist}"
+ONNXRUNTIME_DIR="${LINETIME_ONNXRUNTIME_DIR:-${ROOT_DIR}/vendor/onnxruntime}"
+CUDA_DIR="${LINETIME_CUDA_DIR:-${ROOT_DIR}/vendor/cuda-12.6/lib}"
+JOBS="${LINETIME_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')}"
 
-BUILD_STATIC="build-static"
-DIST_DIR="dist"
-NPROC=$(nproc)
-GPU_FLAG=""
-
-echo "=== linetime bundle build ==="
-echo ""
-
-# Detect GPU provider
-GPU_FLAG=""
-ORT_LIBS=""
-USE_SHARED_ORT=0
-
-if [ -d "vendor/onnxruntime/lib" ] && ls vendor/onnxruntime/lib/*cuda* &>/dev/null 2>&1; then
-    echo "  Detected CUDA ONNX Runtime"
-    GPU_FLAG="-DORT_CUDA"
-    # Use shared libraries for CUDA
-    USE_SHARED_ORT=1
-    CUDA_VENDOR_DIR="vendor/cuda-12.6/lib"
-elif [ -d "vendor/onnxruntime/lib" ] && ls vendor/onnxruntime/lib/*coreml* &>/dev/null 2>&1; then
-    echo "  Detected CoreML ONNX Runtime"
-    GPU_FLAG="-DORT_COREML"
-    USE_SHARED_ORT=1
-else
-    echo "  Using CPU-only ONNX Runtime"
+if [ ! -f "${ONNXRUNTIME_DIR}/include/onnxruntime/core/session/onnxruntime_c_api.h" ]; then
+    printf 'ONNX Runtime headers not found in %s\n' "${ONNXRUNTIME_DIR}" >&2
+    exit 1
 fi
 
-# Step 1: Build whisper.cpp as static library (if not already)
-if [ ! -f "$BUILD_STATIC/src/libwhisper.a" ]; then
-    echo "[1/4] Building whisper.cpp (static)..."
-    mkdir -p "$BUILD_STATIC"
-    cd "$BUILD_STATIC"
-    cmake ../vendor/whisper.cpp \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DGGML_OPENMP=OFF
-    cmake --build . -j"$NPROC"
-    cd "$SCRIPT_DIR"
-else
-    echo "[1/4] whisper.cpp static already built"
+CUDA_REQUESTED="${LINETIME_ENABLE_CUDA:-auto}"
+CUDA_ENABLED=0
+if [ "${CUDA_REQUESTED}" = "1" ] || { [ "${CUDA_REQUESTED}" = "auto" ] && { [ -e "${ONNXRUNTIME_DIR}/lib/libonnxruntime_providers_cuda.so" ] || [ -e "${ONNXRUNTIME_DIR}/onnxruntime_providers_cuda.dll" ]; }; }; then
+    CUDA_ENABLED=1
 fi
 
-echo "[2/4] Compiling linetime..."
-mkdir -p "$BUILD_STATIC/out"
+COREML_REQUESTED="${LINETIME_ENABLE_COREML:-auto}"
+COREML_ENABLED=0
+if [ "${COREML_REQUESTED}" = "1" ] || { [ "${COREML_REQUESTED}" = "auto" ] && [ "$(uname -s)" = "Darwin" ]; }; then
+    COREML_ENABLED=1
+fi
+if [ "${CUDA_ENABLED}" -eq 1 ] && [ "${COREML_ENABLED}" -eq 1 ]; then
+    printf 'CUDA and CoreML are mutually exclusive, pick one\n' >&2
+    exit 1
+fi
 
-WHISPER_SRC="vendor/whisper.cpp/include"
-WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
-GGML_STATIC="$BUILD_STATIC/ggml/src"
-WHISPER_STATIC="$BUILD_STATIC/src"
-ONNX_DIR="vendor/onnxruntime"
-
-if [ $USE_SHARED_ORT -eq 1 ]; then
-    # Use shared ONNX Runtime libraries (for GPU)
-    ORT_RPATH='-Wl,-rpath,$ORIGIN/lib'
-    ORT_LIBS="-L$ONNX_DIR/lib -lonnxruntime -lonnxruntime_providers_cuda -lonnxruntime_providers_shared $ORT_RPATH"
+CMAKE_EXTRA_ARGS=()
+if [ "${CUDA_ENABLED}" -eq 1 ]; then
+    CMAKE_EXTRA_ARGS+=("-DLINETIME_ONNXRUNTIME_STATIC=OFF" "-DLINETIME_ENABLE_CUDA=ON" "-DLINETIME_ENABLE_COREML=OFF")
+elif [ "${COREML_ENABLED}" -eq 1 ]; then
+    CMAKE_EXTRA_ARGS+=("-DLINETIME_ONNXRUNTIME_STATIC=ON" "-DLINETIME_ENABLE_CUDA=OFF" "-DLINETIME_ENABLE_COREML=ON")
 else
-    # Collect all ONNX Runtime static libs
-    ORT_LIBS=""
-    for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
-        ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
+    CMAKE_EXTRA_ARGS+=("-DLINETIME_ONNXRUNTIME_STATIC=ON" "-DLINETIME_ENABLE_CUDA=OFF" "-DLINETIME_ENABLE_COREML=OFF")
+fi
+
+printf '=== Linetime bundle build ===\n'
+printf 'Build directory: %s\n' "${BUILD_DIR}"
+printf 'ONNX Runtime: %s\n' "${ONNXRUNTIME_DIR}"
+printf 'CUDA bundle: %s\n' "${CUDA_ENABLED}"
+printf 'CoreML bundle: %s\n' "${COREML_ENABLED}"
+
+cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLINETIME_ONNXRUNTIME_DIR="${ONNXRUNTIME_DIR}" \
+    -DLINETIME_BUILD_WHISPER_CLI=ON \
+    "${CMAKE_EXTRA_ARGS[@]}"
+cmake --build "${BUILD_DIR}" --target linetime whisper-cli --parallel "${JOBS}"
+
+if [ ! -x "${BUILD_DIR}/bin/linetime" ]; then
+    printf 'Linetime build did not produce %s\n' "${BUILD_DIR}/bin/linetime" >&2
+    exit 1
+fi
+if [ ! -x "${BUILD_DIR}/bin/whisper-cli" ]; then
+    printf 'whisper-cli build did not produce %s\n' "${BUILD_DIR}/bin/whisper-cli" >&2
+    exit 1
+fi
+
+rm -rf "${DIST_DIR}"
+mkdir -p "${DIST_DIR}/models" "${DIST_DIR}/bin"
+install -m 0755 "${BUILD_DIR}/bin/linetime" "${DIST_DIR}/linetime"
+install -m 0755 "${BUILD_DIR}/bin/whisper-cli" "${DIST_DIR}/whisper-cli"
+install -m 0755 "${BUILD_DIR}/bin/whisper-cli" "${DIST_DIR}/bin/whisper-cli"
+
+FFMPEG_SOURCE="${LINETIME_FFMPEG:-}"
+if [ -z "${FFMPEG_SOURCE}" ] && [ -x "${ROOT_DIR}/ffmpeg" ]; then
+    FFMPEG_SOURCE="${ROOT_DIR}/ffmpeg"
+fi
+if [ -z "${FFMPEG_SOURCE}" ] && command -v ffmpeg >/dev/null 2>&1; then
+    FFMPEG_SOURCE="$(command -v ffmpeg)"
+fi
+if [ -z "${FFMPEG_SOURCE}" ] || [ ! -x "${FFMPEG_SOURCE}" ]; then
+    printf 'ffmpeg is required to create a complete bundle\n' >&2
+    exit 1
+fi
+install -m 0755 "${FFMPEG_SOURCE}" "${DIST_DIR}/ffmpeg"
+if ! "${DIST_DIR}/ffmpeg" -version >/dev/null 2>&1; then
+    printf 'Bundled ffmpeg could not be executed\n' >&2
+    exit 1
+fi
+
+copy_glob() {
+    local directory="$1"
+    local pattern="$2"
+    local source
+    [ -d "${directory}" ] || return 0
+    for source in "${directory}"/${pattern}; do
+        [ -e "${source}" ] || continue
+        cp -L "${source}" "${DIST_DIR}/lib/$(basename "${source}")"
     done
-fi
+}
 
-g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
-    $GPU_FLAG \
-    -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" -I"$ONNX_DIR/include/onnxruntime/core/session" \
-    -o "$BUILD_STATIC/out/linetime" \
-    src/main.cpp \
-    src/audio.cpp \
-    src/lyrics.cpp \
-    src/ctc_aligner.cpp \
-    src/lrc_writer.cpp \
-    $ORT_LIBS \
-    -Wl,--allow-multiple-definition \
-    -lpthread -ldl -lm -lgomp -lz
-
-echo "[3/4] Packaging distribution..."
-rm -rf "$DIST_DIR"
-mkdir -p "$DIST_DIR/models"
-
-# Binary
-cp "$BUILD_STATIC/out/linetime" "$DIST_DIR/"
-
-# Copy ONNX Runtime shared libraries if using GPU
-if [ $USE_SHARED_ORT -eq 1 ]; then
-    mkdir -p "$DIST_DIR/lib"
-    cp -L "$ONNX_DIR/lib"/libonnxruntime.so* "$DIST_DIR/lib/" 2>/dev/null || true
-    cp -L "$ONNX_DIR/lib"/libonnxruntime_providers_cuda.so* "$DIST_DIR/lib/" 2>/dev/null || true
-    cp -L "$ONNX_DIR/lib"/libonnxruntime_providers_shared.so* "$DIST_DIR/lib/" 2>/dev/null || true
-    # Bundle CUDA dependencies from vendored location
-    if [ -n "$CUDA_VENDOR_DIR" ] && [ -d "$CUDA_VENDOR_DIR" ]; then
-        cp -L "$CUDA_VENDOR_DIR"/libcublas*.so* "$DIST_DIR/lib/" 2>/dev/null || true
-        cp -L "$CUDA_VENDOR_DIR"/libcudnn*.so* "$DIST_DIR/lib/" 2>/dev/null || true
-        cp -L "$CUDA_VENDOR_DIR"/libcurand*.so* "$DIST_DIR/lib/" 2>/dev/null || true
-        cp -L "$CUDA_VENDOR_DIR"/libcufft*.so* "$DIST_DIR/lib/" 2>/dev/null || true
-        cp -L "$CUDA_VENDOR_DIR"/libcudart*.so* "$DIST_DIR/lib/" 2>/dev/null || true
+if [ "${CUDA_ENABLED}" -eq 1 ]; then
+    mkdir -p "${DIST_DIR}/lib"
+    copy_glob "${ONNXRUNTIME_DIR}/lib" 'libonnxruntime.so*'
+    copy_glob "${ONNXRUNTIME_DIR}/lib" 'libonnxruntime_providers_cuda.so*'
+    copy_glob "${ONNXRUNTIME_DIR}/lib" 'libonnxruntime_providers_shared.so*'
+    copy_glob "${ONNXRUNTIME_DIR}" 'onnxruntime.dll'
+    copy_glob "${ONNXRUNTIME_DIR}" 'onnxruntime_providers_cuda.dll'
+    copy_glob "${ONNXRUNTIME_DIR}" 'onnxruntime_providers_shared.dll'
+    for cuda_directory in "${CUDA_DIR}" /usr/local/cuda/lib64 /usr/local/cuda/lib64/lib /usr/local/cuda/targets/x86_64-linux/lib /usr/lib/x86_64-linux-gnu; do
+        copy_glob "${cuda_directory}" 'libcudart.so*'
+        copy_glob "${cuda_directory}" 'libcublas.so*'
+        copy_glob "${cuda_directory}" 'libcublasLt.so*'
+        copy_glob "${cuda_directory}" 'libcurand.so*'
+        copy_glob "${cuda_directory}" 'libcufft.so*'
+        copy_glob "${cuda_directory}" 'libcudnn*.so*'
+        copy_glob "${cuda_directory}" 'cudart64*.dll'
+        copy_glob "${cuda_directory}" 'cublas64*.dll'
+        copy_glob "${cuda_directory}" 'cublasLt64*.dll'
+        copy_glob "${cuda_directory}" 'curand64*.dll'
+        copy_glob "${cuda_directory}" 'cufft64*.dll'
+        copy_glob "${cuda_directory}" 'cudnn*.dll'
+    done
+    # GLIBCUDA needs the cuBLASLt/cuDNN versions that match the runtime the
+    # provider was linked against, so require one match per component.
+    for component in cudart cublas cublasLt curand cufft cudnn; do
+        if ! compgen -G "${DIST_DIR}/lib/*${component}*" >/dev/null 2>&1; then
+            printf 'Required GPU runtime component is missing: %s\n' "${component}" >&2
+            exit 1
+        fi
+    done
+    if ! compgen -G "${DIST_DIR}/lib/*onnxruntime_providers_cuda*" >/dev/null 2>&1; then
+        printf 'Required GPU runtime library is missing: onnxruntime_providers_cuda\n' >&2
+        exit 1
     fi
-    echo "  Bundled ONNX Runtime GPU libraries and CUDA dependencies"
 fi
 
-# ffmpeg
-if [ -f "$SCRIPT_DIR/ffmpeg" ]; then
-    cp "$SCRIPT_DIR/ffmpeg" "$DIST_DIR/"
-elif command -v ffmpeg &>/dev/null; then
-    cp "$(which ffmpeg)" "$DIST_DIR/"
-    echo "  Bundled system ffmpeg: $(which ffmpeg)"
-else
-    echo "  WARNING: Place ffmpeg binary in $DIST_DIR/"
-fi
-
-# Models
-for f in models/mms_multilingual.onnx models/mms_multilingual_tokenizer.json models/ggml-large-v3.bin; do
-    [ -f "$f" ] && cp "$f" "$DIST_DIR/models/"
+for model in \
+    models/mms_multilingual.onnx \
+    models/mms_multilingual_tokenizer.json \
+    models/ggml-large-v3.bin; do
+    if [ -f "${ROOT_DIR}/${model}" ]; then
+        install -m 0644 "${ROOT_DIR}/${model}" "${DIST_DIR}/models/$(basename "${model}")"
+    fi
 done
 
-echo "[4/4] Done!"
-echo ""
-echo "=== Distribution ==="
-ls -lh "$DIST_DIR/"
-echo ""
-echo "=== Binary dependencies ==="
-ldd "$DIST_DIR/linetime" 2>&1 | head -20
-echo ""
-echo "=== Usage ==="
-echo "  cd $DIST_DIR && ./linetime song.wav lyrics.txt --method a --model-a models/mms_multilingual.onnx --tokenizer models/mms_multilingual_tokenizer.json"
-if [ $USE_SHARED_ORT -eq 1 ]; then
-    echo "  GPU: LD_LIBRARY_PATH=lib ./linetime song.wav lyrics.txt --gpu"
+if [ "$(uname -s)" = "Linux" ] && command -v ldd >/dev/null 2>&1 && ldd "${DIST_DIR}/linetime" 2>/dev/null | grep -Eq 'libwhisper|libggml'; then
+    printf 'Linetime unexpectedly links a Whisper library\n' >&2
+    exit 1
+fi
+
+if [ "${CUDA_ENABLED}" -eq 1 ]; then
+    LD_LIBRARY_PATH="${DIST_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        "${DIST_DIR}/linetime" --help >/dev/null
 else
-    echo "  GPU: ./linetime song.wav lyrics.txt --gpu"
+    "${DIST_DIR}/linetime" --help >/dev/null
+fi
+
+printf 'Bundle runtime files verified in %s\n' "${DIST_DIR}"
+printf 'Required files: linetime, whisper-cli, ffmpeg\n'
+if [ "${CUDA_ENABLED}" -eq 1 ]; then
+    printf 'GPU libraries: %s\n' "${DIST_DIR}/lib"
+fi
+if [ "${COREML_ENABLED}" -eq 1 ]; then
+    printf 'CoreML provider enabled\n'
 fi

@@ -1,16 +1,27 @@
 #include "transcriber.h"
+#include "process.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
-#include <string>
-#include <vector>
-#include <algorithm>
-#include <sstream>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <map>
-#include <unistd.h>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -150,16 +161,24 @@ static JsonValue parse_json(const char*& p) {
 }
 
 static std::string read_file(const std::string& path) {
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return "";
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    std::string s;
-    s.resize(sz);
-    fread(s.data(), 1, sz, f);
-    fclose(f);
-    return s;
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) return "";
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return "";
+    }
+    long size = ftell(file);
+    if (size < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return "";
+    }
+    std::string content(static_cast<size_t>(size), '\0');
+    size_t read = 0;
+    if (!content.empty())
+        read = fread(content.data(), 1, content.size(), file);
+    content.resize(read);
+    fclose(file);
+    return content;
 }
 
 static long parse_time_ms(const std::string& ts) {
@@ -190,6 +209,44 @@ static bool is_word_boundary(const std::string& tok_text) {
 // Whisper control/special tokens: [\_BEG_], [\_TT_1499], etc.
 static bool is_special_token(const std::string& t) {
     return t.size() >= 2 && t[0] == '[' && t[1] == '_';
+}
+
+// Folded to lower case with punctuation and spacing removed, so a repeat is
+// recognised regardless of how whisper chose to capitalise or space it.
+static std::string repetition_key(const std::string& text) {
+    std::string key;
+    key.reserve(text.size());
+    for (char c : text) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 'A' && uc <= 'Z') c = static_cast<char>(uc - 'A' + 'a');
+        if ((uc >= 'a' && uc <= 'z') || (uc >= '0' && uc <= '9')) key.push_back(c);
+    }
+    return key;
+}
+
+// whisper locks onto a phrase and repeats it verbatim when a passage has no
+// intelligible speech. It exits cleanly and reports high token confidence, so it
+// cannot be filtered afterwards by score alone. A run of identical adjacent
+// segments is therefore dropped, keeping the first, which is the only one that
+// carried real timing information.
+static void drop_repeated_segments(std::vector<WhisperSegment>& segments) {
+    std::vector<WhisperSegment> kept;
+    kept.reserve(segments.size());
+    size_t dropped = 0;
+    for (WhisperSegment& segment : segments) {
+        const std::string key = repetition_key(segment.text);
+        if (!key.empty() && !kept.empty() && repetition_key(kept.back().text) == key) {
+            dropped++;
+            continue;
+        }
+        kept.push_back(std::move(segment));
+    }
+    if (dropped > 0) {
+        fprintf(stderr, "  Dropped %zu repeated segment(s) from the transcript\n", dropped);
+    }
+    // Always written back: the loop above moves out of `segments`, so leaving it
+    // untouched would replace every segment with an empty one.
+    segments = std::move(kept);
 }
 
 // Parse a whisper-cli -ojf JSON file into a TranscriptionResult
@@ -254,68 +311,293 @@ TranscriptionResult load_transcription_json(const std::string& json_path) {
         result.segments.push_back(std::move(segment));
     }
 
+    drop_repeated_segments(result.segments);
+
     result.success = true;
     return result;
 }
 
-TranscriptionResult transcribe_audio(const std::string& audio_path,
+class PrivateTempDirectory {
+public:
+    bool create(std::string& error) {
+        std::error_code code;
+        fs::path base = fs::temp_directory_path(code);
+        if (code) {
+            error = "failed to locate temporary directory: " + code.message();
+            return false;
+        }
+
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            long long tick = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            unsigned long long sequence = temp_sequence.fetch_add(1);
+            std::string name = "linetime-" +
+                std::to_string(process::current_process_id()) + "-" +
+                std::to_string(tick) + "-" + std::to_string(sequence);
+            fs::path candidate = base / name;
+            code.clear();
+#ifdef _WIN32
+            bool created = fs::create_directory(candidate, code);
+#else
+            bool created = ::mkdir(candidate.c_str(), S_IRUSR | S_IWUSR | S_IXUSR) == 0;
+            if (!created && errno != EEXIST)
+                code = std::error_code(errno, std::generic_category());
+#endif
+            if (created && code) {
+                std::error_code ignored;
+                fs::remove_all(candidate, ignored);
+                code.clear();
+                continue;
+            }
+            if (!created || code) continue;
+
+#ifndef _WIN32
+            code.clear();
+            fs::permissions(candidate,
+                            fs::perms::owner_read | fs::perms::owner_write |
+                                fs::perms::owner_exec,
+                            fs::perm_options::replace, code);
+            if (code) {
+                std::error_code ignored;
+                fs::remove_all(candidate, ignored);
+                error = "failed to secure temporary directory: " + code.message();
+                return false;
+            }
+#endif
+            path_ = candidate;
+            return true;
+        }
+        error = "failed to create a unique temporary directory";
+        return false;
+    }
+
+    ~PrivateTempDirectory() {
+        if (path_.empty()) return;
+        std::error_code ignored;
+        fs::remove_all(path_, ignored);
+    }
+
+    const fs::path& path() const { return path_; }
+
+private:
+    fs::path path_;
+    static inline std::atomic<unsigned long long> temp_sequence{0};
+};
+
+static bool write_pcm16_wav(const fs::path& path, const AudioBuffer& audio,
+                            std::string& error) {
+    if (audio.sample_rate != 16000) {
+        error = "audio buffer is not 16 kHz";
+        return false;
+    }
+    if (audio.n_samples < 0 ||
+        static_cast<size_t>(audio.n_samples) > audio.samples.size()) {
+        error = "audio buffer sample count is invalid";
+        return false;
+    }
+
+    size_t sample_count = audio.n_samples == 0
+                              ? audio.samples.size()
+                              : static_cast<size_t>(audio.n_samples);
+    if (sample_count > (std::numeric_limits<uint32_t>::max() - 36) / 2) {
+        error = "audio buffer is too large for a WAV file";
+        return false;
+    }
+
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        error = "failed to create temporary WAV file";
+        return false;
+    }
+
+    auto write_u16 = [&output](uint16_t value) {
+        char bytes[2] = {
+            static_cast<char>(value & 0xff),
+            static_cast<char>((value >> 8) & 0xff)
+        };
+        output.write(bytes, sizeof(bytes));
+    };
+    auto write_u32 = [&output](uint32_t value) {
+        char bytes[4] = {
+            static_cast<char>(value & 0xff),
+            static_cast<char>((value >> 8) & 0xff),
+            static_cast<char>((value >> 16) & 0xff),
+            static_cast<char>((value >> 24) & 0xff)
+        };
+        output.write(bytes, sizeof(bytes));
+    };
+
+    uint32_t data_size = static_cast<uint32_t>(sample_count * 2);
+    output.write("RIFF", 4);
+    write_u32(36 + data_size);
+    output.write("WAVE", 4);
+    output.write("fmt ", 4);
+    write_u32(16);
+    write_u16(1);
+    write_u16(1);
+    write_u32(16000);
+    write_u32(16000 * 2);
+    write_u16(2);
+    write_u16(16);
+    output.write("data", 4);
+    write_u32(data_size);
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        float value = audio.samples[i];
+        if (!std::isfinite(value)) value = 0.0f;
+        value = std::max(-1.0f, std::min(1.0f, value));
+        int pcm = value < 0.0f
+                      ? static_cast<int>(std::lround(value * 32768.0f))
+                      : static_cast<int>(std::lround(value * 32767.0f));
+        pcm = std::max(-32768, std::min(32767, pcm));
+        write_u16(static_cast<uint16_t>(static_cast<int16_t>(pcm)));
+    }
+    output.close();
+    if (!output) {
+        error = "failed to write temporary WAV file";
+        return false;
+    }
+    return true;
+}
+
+static void cache_transcript(const fs::path& source, const std::string& cache_name) {
+    const char* configured = std::getenv("LTC_CACHE_DIR");
+    if (!configured || !*configured) return;
+
+    std::error_code code;
+    fs::path directory(configured);
+    fs::create_directories(directory, code);
+    if (code) {
+        fprintf(stderr, "[transcriber] Cache directory unavailable: %s\n",
+                code.message().c_str());
+        return;
+    }
+
+    std::string name = cache_name;
+    if (name.empty()) {
+        uint64_t hash = 1469598103934665603ULL;
+        std::ifstream input(source, std::ios::binary);
+        char buffer[8192];
+        while (input) {
+            input.read(buffer, sizeof(buffer));
+            std::streamsize count = input.gcount();
+            for (std::streamsize i = 0; i < count; ++i) {
+                hash ^= static_cast<unsigned char>(buffer[i]);
+                hash *= 1099511628211ULL;
+            }
+        }
+        name = "audio_" + std::to_string(hash);
+    } else {
+        name = fs::path(name).filename().string();
+        if (name.size() >= 5 && name.compare(name.size() - 5, 5, ".json") == 0)
+            name.resize(name.size() - 5);
+    }
+    if (name.empty()) name = "transcript";
+
+    fs::path destination = directory / (name + ".json");
+    code.clear();
+    fs::copy_file(source, destination,
+                  fs::copy_options::overwrite_existing, code);
+    if (code) {
+        fprintf(stderr, "[transcriber] Cache copy failed: %s\n",
+                code.message().c_str());
+        return;
+    }
+    fprintf(stderr, "[transcriber] Cached transcript -> %s\n",
+            destination.string().c_str());
+}
+
+TranscriptionResult transcribe_audio(const AudioBuffer& audio,
                                      const std::string& model_path,
+                                     const std::string& whisper_cli_path,
                                      const std::string& language,
-                                     int threads) {
+                                     Provider provider,
+                                     int threads,
+                                     const std::vector<std::string>& environment_additions,
+                                     const std::string& cache_name) {
     TranscriptionResult result;
+    PrivateTempDirectory temporary;
+    try {
+        std::string error;
+        if (!temporary.create(error)) {
+            result.error = error;
+            return result;
+        }
+        if (audio.samples.empty() || audio.n_samples < 0) {
+            result.error = "audio buffer is empty";
+            return result;
+        }
+        if (model_path.empty()) {
+            result.error = "Whisper model path is empty";
+            return result;
+        }
+        if (whisper_cli_path.empty()) {
+            result.error = "whisper-cli path is empty";
+            return result;
+        }
+        if (language.empty()) {
+            result.error = "Whisper language is empty";
+            return result;
+        }
 
-    // Build command
-    std::string tmp_base = "/tmp/linetime_transcribe_" + std::to_string(getpid());
-    std::string cmd = "LD_LIBRARY_PATH=dist/lib dist/bin/whisper-cli "
-        "-m " + model_path + " "
-        "-l " + language + " "
-        "-f " + audio_path + " "
-        "-ojf -of " + tmp_base + " "
-        "-t " + std::to_string(threads) + " "
-        "-ml 60 "
-        "-np 2>&1";
+        fs::path wav_path = temporary.path() / "audio.wav";
+        if (!write_pcm16_wav(wav_path, audio, error)) {
+            result.error = error;
+            return result;
+        }
+        fs::path output_prefix = temporary.path() / "transcript";
+        fs::path json_path = temporary.path() / "transcript.json";
 
-    fprintf(stderr, "[transcriber] Running: %s\n", cmd.c_str());
+        int thread_count = threads > 0 ? threads : 16;
+        std::vector<std::string> arguments = {
+            whisper_cli_path,
+            "-m", model_path,
+            "-l", language,
+            "-f", wav_path.string(),
+            "-ojf",
+            "-of", output_prefix.string(),
+            "-t", std::to_string(thread_count),
+            "-ml", "60",
+            // Context conditioning feeds the previous segment back in as a prompt.
+            // On instrumental passages that locks the decoder into a single phrase
+            // and it then repeats for the whole track, so it is disabled.
+            "-mc", "0",
+            // Drops [MUSIC], [BLINK] and similar non-speech artefacts.
+            "-sns",
+            "-np"
+        };
+        if (provider == Provider::CPU)
+            arguments.push_back("-ng");
 
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        result.error = "Failed to run whisper-cli";
-        return result;
+        fprintf(stderr, "[transcriber] Running: %s\n", whisper_cli_path.c_str());
+        process::Result execution = process::run(arguments, environment_additions);
+        if (!execution.started) {
+            result.error = "failed to run whisper-cli: " + execution.error;
+            return result;
+        }
+        if (execution.exit_code != 0 || !execution.error.empty()) {
+            result.error = "whisper-cli failed (exit " +
+                           std::to_string(execution.exit_code) + "): " +
+                           execution.stderr_data;
+            if (!execution.error.empty())
+                result.error += "; " + execution.error;
+            return result;
+        }
+
+        TranscriptionResult parsed = load_transcription_json(json_path.string());
+        if (!parsed.success) return parsed;
+        try {
+            cache_transcript(json_path, cache_name);
+        } catch (const std::exception& exception) {
+            fprintf(stderr, "[transcriber] Cache failed: %s\n", exception.what());
+        } catch (...) {
+            fprintf(stderr, "[transcriber] Cache failed with an unknown exception\n");
+        }
+        return parsed;
+    } catch (const std::exception& exception) {
+        result.error = std::string("transcription failed: ") + exception.what();
+    } catch (...) {
+        result.error = "transcription failed with an unknown exception";
     }
-
-    char buffer[4096];
-    std::string stderr_output;
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        stderr_output += buffer;
-    }
-    int status = pclose(pipe);
-    if (status != 0) {
-        result.error = "whisper-cli failed (exit " + std::to_string(status) + "): " + stderr_output;
-        return result;
-    }
-
-    std::string json_path = tmp_base + ".json";
-
-    // Optional: cache the raw JSON transcript for debugging/iteration
-    const char* cache_dir = getenv("LTC_CACHE_DIR");
-    if (cache_dir && *cache_dir) {
-        std::string cache_path = std::string(cache_dir) + "/" +
-            fs::path(audio_path).stem().string() + ".json";
-        std::filesystem::copy_file(json_path, cache_path,
-                                   std::filesystem::copy_options::overwrite_existing);
-        fprintf(stderr, "[transcriber] Cached transcript -> %s\n", cache_path.c_str());
-    }
-
-    result = load_transcription_json(json_path);
-
-    // Clean up temp files
-    std::remove((tmp_base + ".json").c_str());
-    std::remove((tmp_base + ".txt").c_str());
-    std::remove((tmp_base + ".vtt").c_str());
-    std::remove((tmp_base + ".srt").c_str());
-    std::remove((tmp_base + ".tsv").c_str());
-    std::remove((tmp_base + ".wts").c_str());
-    std::remove((tmp_base + ".lrc").c_str());
-
     return result;
 }

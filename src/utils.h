@@ -7,8 +7,18 @@
 #include <cmath>
 #include <sstream>
 #include <cstdint>
+#include <cstdio>
 
 namespace utils {
+
+// Emits a machine readable progress line on stderr so a UI can drive a
+// progress bar. The percentage is an overall 0-100 estimate across stages.
+inline void report_progress(int percent, const std::string& stage) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    fprintf(stderr, "[progress] %d%% %s\n", percent, stage.c_str());
+    fflush(stderr);
+}
 
 inline std::string to_lower(const std::string& s) {
     std::string result = s;

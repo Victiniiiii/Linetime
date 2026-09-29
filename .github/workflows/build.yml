@@ -2,11 +2,10 @@ name: Build
 
 on:
   push:
-    tags:
-      - 'v*'
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-linux:
@@ -16,53 +15,51 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build whisper.cpp (static)
+      - name: Build Linetime and whisper-cli
         run: |
-          mkdir -p build-static
-          cd build-static
-          cmake ../vendor/whisper.cpp -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENMP=OFF
-          cmake --build . -j$(nproc)
-
-      - name: Build linetime
-        run: |
-          WHISPER_SRC="vendor/whisper.cpp/include"
-          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
-          GGML_STATIC="build-static/ggml/src"
-          WHISPER_STATIC="build-static/src"
-          ONNX_DIR="vendor/onnxruntime"
-
-          ORT_LIBS=""
-          for lib in $(find "$ONNX_DIR/lib" -name "*.a" | sort); do
-            ORT_LIBS="$ORT_LIBS -Wl,--whole-archive $lib -Wl,--no-whole-archive"
-          done
-
-          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
-            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_DIR/include/onnxruntime/core/session" \
-            -o linetime-linux-x64 \
-            src/main.cpp src/audio.cpp src/lyrics.cpp \
-            src/ctc_aligner.cpp src/whisper_aligner.cpp \
-            src/merger.cpp src/lrc_writer.cpp \
-            "$WHISPER_STATIC/libwhisper.a" \
-            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
-            $ORT_LIBS \
-            -Wl,--allow-multiple-definition \
-            -lpthread -ldl -lm -lgomp -lz
+          set -euo pipefail
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLINETIME_ONNXRUNTIME_DIR="$PWD/vendor/onnxruntime" \
+            -DLINETIME_ONNXRUNTIME_STATIC=ON \
+            -DLINETIME_BUILD_WHISPER_CLI=ON
+          cmake --build build --target linetime whisper-cli --parallel "$(nproc)"
+          test -x build/bin/linetime
+          test -x build/bin/whisper-cli
+          ./build/bin/linetime --help
+          if ldd build/bin/linetime | grep -Eq 'libwhisper|libggml'; then
+            echo "Linetime links a Whisper library directly" >&2
+            exit 1
+          fi
 
       - name: Download ffmpeg
         run: |
-          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-          tar xf ffmpeg-release-amd64-static.tar.xz
-          cp ffmpeg-*-static/ffmpeg .
+          set -euo pipefail
+          curl -fsSL -o ffmpeg-release-amd64-static.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg-release-amd64-static.tar.xz
+          ffmpeg_path=
+          for candidate in ffmpeg-*-static/ffmpeg; do
+            if [ -f "$candidate" ]; then
+              ffmpeg_path="$candidate"
+              break
+            fi
+          done
+          test -n "$ffmpeg_path"
+          install -m 0755 "$ffmpeg_path" ffmpeg
+          test -x ffmpeg
+          ./ffmpeg -version
 
-      - name: Verify
+      - name: Verify archive contents
         run: |
-          ./linetime-linux-x64 --help
-          ldd linetime-linux-x64
-
-      - name: Package
-        run: |
-          tar czf linetime-linux-x64.tar.gz linetime-linux-x64 ffmpeg
+          set -euo pipefail
+          cp build/bin/linetime linetime-linux-x64
+          cp build/bin/whisper-cli whisper-cli
+          tar -czf linetime-linux-x64.tar.gz linetime-linux-x64 whisper-cli ffmpeg
+          test -f linetime-linux-x64.tar.gz
+          archive_listing="$(tar -tzf linetime-linux-x64.tar.gz)"
+          for required in linetime-linux-x64 whisper-cli ffmpeg; do
+            printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -78,6 +75,7 @@ jobs:
 
       - name: Install CUDA 12 toolkit
         run: |
+          set -euo pipefail
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
@@ -85,67 +83,100 @@ jobs:
 
       - name: Download ONNX Runtime GPU
         run: |
+          set -euo pipefail
           wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-gpu-1.19.2.tgz
           tar xzf onnxruntime-linux-x64-gpu-1.19.2.tgz
           mkdir -p vendor/onnxruntime-gpu
           cp -r onnxruntime-linux-x64-gpu-1.19.2/* vendor/onnxruntime-gpu/
 
-      - name: Build whisper.cpp (static)
+      - name: Build Linetime and whisper-cli
         run: |
-          mkdir -p build-static
-          cd build-static
-          cmake ../vendor/whisper.cpp -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_OPENMP=OFF
-          cmake --build . -j$(nproc)
+          set -euo pipefail
+          cmake -S . -B build-gpu \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLINETIME_ONNXRUNTIME_DIR="$PWD/vendor/onnxruntime-gpu" \
+            -DLINETIME_ONNXRUNTIME_STATIC=OFF \
+            -DLINETIME_ENABLE_CUDA=ON \
+            -DLINETIME_BUILD_WHISPER_CLI=ON
+          cmake --build build-gpu --target linetime whisper-cli --parallel "$(nproc)"
+          test -x build-gpu/bin/linetime
+          test -x build-gpu/bin/whisper-cli
+          if ldd build-gpu/bin/linetime | grep -Eq 'libwhisper|libggml'; then
+            echo "Linetime links a Whisper library directly" >&2
+            exit 1
+          fi
 
-      - name: Build linetime (GPU)
+      - name: Download ffmpeg
         run: |
-          WHISPER_SRC="vendor/whisper.cpp/include"
-          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
-          GGML_STATIC="build-static/ggml/src"
-          WHISPER_STATIC="build-static/src"
-          ONNX_GPU="vendor/onnxruntime-gpu"
-          CUDA_HOME="/usr/local/cuda"
-
-          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
-            -DORT_CUDA \
-            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_GPU/include" \
-            -I"$CUDA_HOME/include" \
-            -o linetime \
-            src/main.cpp src/audio.cpp src/lyrics.cpp \
-            src/ctc_aligner.cpp src/whisper_aligner.cpp \
-            src/merger.cpp src/lrc_writer.cpp \
-            "$WHISPER_STATIC/libwhisper.a" \
-            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
-            -L"$ONNX_GPU/lib" -lonnxruntime -lonnxruntime_providers_cuda -lonnxruntime_providers_shared \
-            -Wl,-rpath,'$ORIGIN/lib' \
-            -Wl,--allow-multiple-definition \
-            -lpthread -ldl -lm -lgomp -lz
+          set -euo pipefail
+          curl -fsSL -o ffmpeg-release-amd64-static.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg-release-amd64-static.tar.xz
+          ffmpeg_path=
+          for candidate in ffmpeg-*-static/ffmpeg; do
+            if [ -f "$candidate" ]; then
+              ffmpeg_path="$candidate"
+              break
+            fi
+          done
+          test -n "$ffmpeg_path"
+          install -m 0755 "$ffmpeg_path" ffmpeg
+          test -x ffmpeg
+          ./ffmpeg -version
 
       - name: Bundle GPU libraries
         run: |
+          set -euo pipefail
           mkdir -p lib
-          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime.so.1 lib/
-          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_cuda.so lib/
-          cp -L vendor/onnxruntime-gpu/lib/libonnxruntime_providers_shared.so lib/
-          # CUDA runtime libs - copy each SONAME exactly once (cp -L on .so* duplicates files)
-          cp -L /usr/local/cuda/lib64/libcudart.so.12 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcublas.so.12 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcublasLt.so.12 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcurand.so.10 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcufft.so.11 lib/ 2>/dev/null || true
-          cp -L /usr/local/cuda/lib64/libcudnn.so.9 lib/ 2>/dev/null || true
-          echo "GPU libs:"
-          du -sh lib
-          ls -lh lib/
+          for pattern in \
+            'libonnxruntime.so*' \
+            'libonnxruntime_providers_cuda.so*' \
+            'libonnxruntime_providers_shared.so*'; do
+            for source in vendor/onnxruntime-gpu/lib/$pattern; do
+              [ -e "$source" ] || continue
+              cp -L "$source" "lib/$(basename "$source")"
+            done
+          done
+          for cuda_dir in /usr/local/cuda/lib64 /usr/local/cuda/targets/x86_64-linux/lib /usr/lib/x86_64-linux-gnu; do
+            [ -d "$cuda_dir" ] || continue
+            for pattern in \
+              'libcudart.so*' \
+              'libcublas.so*' \
+              'libcublasLt.so*' \
+              'libcurand.so*' \
+              'libcufft.so*' \
+              'libcudnn*.so*'; do
+              for source in "$cuda_dir"/$pattern; do
+                [ -e "$source" ] || continue
+                cp -L "$source" "lib/$(basename "$source")"
+              done
+            done
+          done
+          for required_library in \
+            libonnxruntime.so.1 \
+            libonnxruntime_providers_cuda.so \
+            libonnxruntime_providers_shared.so \
+            libcudart.so.12 \
+            libcublas.so.12 \
+            libcublasLt.so.12 \
+            libcurand.so.10 \
+            libcufft.so.11 \
+            libcudnn.so.9; do
+            test -e "lib/$required_library"
+          done
+          LD_LIBRARY_PATH="$PWD/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            build-gpu/bin/linetime --help
 
-      - name: Verify
+      - name: Verify archive contents
         run: |
-          LD_LIBRARY_PATH=lib ./linetime --help
-
-      - name: Package
-        run: |
-          tar czf linetime-linux-x64-gpu.tar.gz linetime lib
+          set -euo pipefail
+          cp build-gpu/bin/linetime linetime
+          cp build-gpu/bin/whisper-cli whisper-cli
+          tar -czf linetime-linux-x64-gpu.tar.gz linetime whisper-cli ffmpeg lib
+          archive_listing="$(tar -tzf linetime-linux-x64-gpu.tar.gz)"
+          for required in linetime whisper-cli ffmpeg; do
+            printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
+          done
+          printf '%s\n' "$archive_listing" | grep -E '^lib/[^/]+' >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
@@ -159,63 +190,79 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build whisper.cpp (static, universal)
+      - name: Install packaging tools
         run: |
-          mkdir -p build-static
-          cd build-static
-          cmake ../vendor/whisper.cpp \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_OPENMP=OFF \
-            -DGGML_METAL=OFF \
-            -DGGML_BLAS=OFF \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          cmake --build . -j$(sysctl -n hw.ncpu)
+          set -euo pipefail
+          brew install ffmpeg dylibbundler
 
-      - name: Download ONNX Runtime (universal2)
+      - name: Download ONNX Runtime universal2
         run: |
+          set -euo pipefail
           curl -fSL -o onnxruntime-osx-universal2-1.19.2.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-osx-universal2-1.19.2.tgz
           tar xzf onnxruntime-osx-universal2-1.19.2.tgz
 
-      - name: Build linetime (universal)
+      - name: Build Linetime and whisper-cli
         run: |
-          WHISPER_SRC="vendor/whisper.cpp/include"
-          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
-          GGML_STATIC="build-static/ggml/src"
-          WHISPER_STATIC="build-static/src"
-          ONNX_DIR="onnxruntime-osx-universal2-1.19.2"
+          set -euo pipefail
+          cmake -S . -B build-macos \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DLINETIME_ONNXRUNTIME_DIR="$PWD/onnxruntime-osx-universal2-1.19.2" \
+            -DLINETIME_ONNXRUNTIME_STATIC=OFF \
+            -DLINETIME_ENABLE_COREML=ON \
+            -DLINETIME_BUILD_WHISPER_CLI=ON
+          cmake --build build-macos --target linetime whisper-cli --parallel "$(sysctl -n hw.ncpu)"
+          test -x build-macos/bin/linetime
+          test -x build-macos/bin/whisper-cli
+          lipo -info build-macos/bin/linetime
+          lipo -info build-macos/bin/whisper-cli
+          if otool -L build-macos/bin/linetime | grep -E '/opt/homebrew|/usr/local'; then
+            echo "Linetime has a non-relocatable Homebrew dependency" >&2
+            exit 1
+          fi
 
-          clang++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result \
-            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_DIR/include" \
-            -arch arm64 -arch x86_64 \
-            -o linetime-macos-universal \
-            src/main.cpp src/audio.cpp src/lyrics.cpp \
-            src/ctc_aligner.cpp src/whisper_aligner.cpp \
-            src/merger.cpp src/lrc_writer.cpp \
-            "$WHISPER_STATIC/libwhisper.a" \
-            "$GGML_STATIC/libggml.a" "$GGML_STATIC/libggml-base.a" "$GGML_STATIC/libggml-cpu.a" \
-            -L"$ONNX_DIR/lib" -lonnxruntime \
-            -Wl,-rpath,@loader_path \
-            -lpthread -lm -lz -framework Accelerate
-
-      - name: Download ffmpeg
+      - name: Package relocatable runtime files
         run: |
-          brew install ffmpeg
-          cp "$(which ffmpeg)" .
+          set -euo pipefail
+          mkdir -p lib
+          cp build-macos/bin/linetime linetime-macos-universal
+          cp build-macos/bin/whisper-cli whisper-cli
+          for dylib in onnxruntime-osx-universal2-1.19.2/lib/*.dylib; do
+            [ -e "$dylib" ] || continue
+            cp -L "$dylib" .
+          done
+          cp "$(command -v ffmpeg)" ffmpeg
+          dylibbundler -od -b -x "$PWD/ffmpeg" -d "$PWD/lib" -p '@loader_path/lib/'
+          for dylib in ./*.dylib lib/*.dylib; do
+            [ -e "$dylib" ] || continue
+            if otool -L "$dylib" | grep -E '/opt/homebrew|/usr/local'; then
+              echo "Non-relocatable dependency in $dylib" >&2
+              exit 1
+            fi
+          done
+          for binary in ffmpeg whisper-cli linetime-macos-universal; do
+            test -x "$binary"
+            if otool -L "$binary" | grep -E '/opt/homebrew|/usr/local'; then
+              echo "Non-relocatable dependency in $binary" >&2
+              exit 1
+            fi
+          done
+          if ! compgen -G 'lib/*.dylib' >/dev/null; then
+            echo 'No relocatable runtime dylibs were bundled' >&2
+            exit 1
+          fi
 
-      - name: Bundle ONNX Runtime dylib
+      - name: Verify archive contents
         run: |
-          cp onnxruntime-osx-universal2-1.19.2/lib/libonnxruntime.1.19.2.dylib .
-
-      - name: Verify
-        run: |
-          file linetime-macos-universal
+          set -euo pipefail
           ./linetime-macos-universal --help
-
-      - name: Package
-        run: |
-          tar czf linetime-macos-universal.tar.gz linetime-macos-universal libonnxruntime.1.19.2.dylib ffmpeg
+          tar -czf linetime-macos-universal.tar.gz linetime-macos-universal whisper-cli ffmpeg lib
+          archive_listing="$(tar -tzf linetime-macos-universal.tar.gz)"
+          for required in linetime-macos-universal whisper-cli ffmpeg; do
+            printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
+          done
+          printf '%s\n' "$archive_listing" | grep -E '^lib/[^/]+' >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
@@ -238,60 +285,71 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make
 
-      - name: Build whisper.cpp (static)
+      - name: Build Linetime and whisper-cli
         run: |
-          mkdir -p build-static
-          cd build-static
-          cmake ../vendor/whisper.cpp \
-            -G "MSYS Makefiles" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_OPENMP=OFF
-          cmake --build . -j$(nproc)
-
-      - name: Download ONNX Runtime
-        run: |
+          set -euo pipefail
           curl -fSL -o onnxruntime-win-x64-1.19.2.zip https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip
           unzip -q onnxruntime-win-x64-1.19.2.zip
-
-      - name: Build linetime
-        run: |
-          WHISPER_SRC="vendor/whisper.cpp/include"
-          WHISPER_GGML_SRC="vendor/whisper.cpp/ggml/include"
-          GGML_STATIC="build-static/ggml/src"
-          WHISPER_STATIC="build-static/src"
-          ONNX_DIR="onnxruntime-win-x64-1.19.2"
-
-          g++ -O3 -DNDEBUG -std=c++17 -Wno-unused-result -D_stdcall= -DORT_DLL_IMPORT \
-            -Isrc -Ivendor -I"$WHISPER_SRC" -I"$WHISPER_GGML_SRC" \
-            -I"$ONNX_DIR/include" \
-            -o linetime-windows-x64.exe \
-            src/main.cpp src/audio.cpp src/lyrics.cpp \
-            src/ctc_aligner.cpp src/whisper_aligner.cpp \
-            src/merger.cpp src/lrc_writer.cpp \
-            "$WHISPER_STATIC/libwhisper.a" \
-            "$GGML_STATIC/ggml.a" "$GGML_STATIC/ggml-base.a" "$GGML_STATIC/ggml-cpu.a" \
-            -L"$ONNX_DIR/lib" -l:onnxruntime.lib \
-            -Wl,--allow-multiple-definition \
-            -lpthread -lm -lz
+          cmake -S . -B build \
+            -G "MSYS Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLINETIME_ONNXRUNTIME_DIR="$PWD/onnxruntime-win-x64-1.19.2" \
+            -DLINETIME_ONNXRUNTIME_STATIC=OFF \
+            -DLINETIME_BUILD_WHISPER_CLI=ON
+          cmake --build build --target linetime whisper-cli --parallel "$(nproc)"
+          test -x build/bin/linetime.exe
+          test -x build/bin/whisper-cli.exe
+          ./build/bin/linetime.exe --help
+          if objdump -p build/bin/linetime.exe | grep -E 'DLL Name: (libwhisper|libggml)'; then
+            echo "Linetime links a Whisper library directly" >&2
+            exit 1
+          fi
 
       - name: Download ffmpeg
         run: |
+          set -euo pipefail
           wget -q https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
           unzip -q ffmpeg-release-essentials.zip
-          cp ffmpeg-*-essentials_build/bin/ffmpeg.exe .
+          ffmpeg_path=
+          for candidate in ffmpeg-*-essentials_build/bin/ffmpeg.exe; do
+            if [ -f "$candidate" ]; then
+              ffmpeg_path="$candidate"
+              break
+            fi
+          done
+          test -n "$ffmpeg_path"
+          install -m 0755 "$ffmpeg_path" ffmpeg.exe
+          test -f ffmpeg.exe
 
-      - name: Bundle ONNX Runtime DLL
+      - name: Bundle runtime DLLs
         run: |
-          cp onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll .
+          set -euo pipefail
+          cp build/bin/linetime.exe linetime-windows-x64.exe
+          cp build/bin/whisper-cli.exe whisper-cli.exe
+          cp onnxruntime-win-x64-1.19.2/lib/*.dll .
+          for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+            source="$(gcc -print-file-name="$dll")"
+            if [ ! -f "$source" ]; then
+              source="$(dirname "$(command -v gcc)")/$dll"
+            fi
+            test -f "$source"
+            cp "$source" .
+          done
+          test -f onnxruntime.dll
+          test -f libgcc_s_seh-1.dll
+          test -f libstdc++-6.dll
+          test -f libwinpthread-1.dll
 
-      - name: Verify
+      - name: Verify archive contents
         run: |
+          set -euo pipefail
           ./linetime-windows-x64.exe --help
-
-      - name: Package
-        run: |
-          tar czf linetime-windows-x64.tar.gz linetime-windows-x64.exe onnxruntime.dll ffmpeg.exe
+          tar -czf linetime-windows-x64.tar.gz \
+            linetime-windows-x64.exe whisper-cli.exe ffmpeg.exe *.dll
+          archive_listing="$(tar -tzf linetime-windows-x64.tar.gz)"
+          for required in linetime-windows-x64.exe whisper-cli.exe ffmpeg.exe onnxruntime.dll; do
+            printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -299,8 +357,11 @@ jobs:
           path: linetime-windows-x64.tar.gz
 
   release:
+    if: github.ref_type == 'tag'
     needs: [build-linux, build-linux-gpu, build-macos, build-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
 
