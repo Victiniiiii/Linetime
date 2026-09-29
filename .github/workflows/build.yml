@@ -313,6 +313,31 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake ninja
 
+      - name: Report the C++ toolchain threading setup
+        run: |
+          set -euo pipefail
+          # Every libstdc++ header that reaches <ext/atomicity> is failing to find
+          # the gthread types and falling through to gthr-default.h, the
+          # no-threads fallback. -pthread is already on the compile line, so the
+          # flag is not the cause. These facts settle whether the winpthreads
+          # headers are installed, whether this libstdc++ was configured with
+          # thread support at all, and what the include search order really is.
+          echo "== pthread.h locations =="
+          c++ -E -Wp,-v -xc++ /dev/null 2>&1 | sed -n 's/^ *\(.*\)$/\1/p' | grep -v '^#' | while read -r d; do
+            [ -f "$d/pthread.h" ] && echo "  found: $d/pthread.h"
+          done
+          echo "== _GLIBCXX_HAS_GTHREADS in this libstdc++ =="
+          c++ -E -x c++ - <<<'#include <bits/c++config.h>' 2>/dev/null \
+            | grep -E '_GLIBCXX_HAS_GTHREADS' | head -1 | sed 's/^/  /' || true
+          echo "== winpthreads and gcc packages =="
+          pacman -Q 2>/dev/null | grep -iE 'winpthreads|gcc' | sed 's/^/  /' || true
+          echo "== can <sstream> be preprocessed on its own? =="
+          if echo '#include <sstream>' | c++ -x c++ -E - -o /dev/null 2>/dev/null; then
+            echo "  <sstream> preprocesses cleanly on its own"
+          else
+            echo "  <sstream> FAILS on its own, so the toolchain is broken independently of this project"
+          fi
+
       - name: Build Linetime and whisper-cli
         run: |
           set -euo pipefail
@@ -406,7 +431,9 @@ jobs:
 
       - uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: '12.6'
+          # Full semver: the action parses this with the semver library and
+          # rejects a bare "12.6".
+          cuda: '12.6.0'
           method: network
           sub-packages: '["nvcc", "cudart", "cublas", "cufft", "curand", "nvrtc"]'
 
