@@ -290,19 +290,27 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake make
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake ninja
 
       - name: Build Linetime and whisper-cli
         run: |
           set -euo pipefail
           curl -fSL -o onnxruntime-win-x64-1.19.2.zip https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip
           unzip -q onnxruntime-win-x64-1.19.2.zip
+          # This job uses the MINGW64 toolchain, so it needs the MinGW generator.
+          # "MSYS Makefiles" targets the MSYS runtime instead, and the resulting
+          # paths left libstdc++ unable to find its gthread headers, which broke
+          # every standard header that reaches <atomicity>. Ninja sidesteps the
+          # generator question entirely.
           cmake -S . -B build \
-            -G "MSYS Makefiles" \
+            -G "Ninja" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLINETIME_ONNXRUNTIME_DIR="$PWD/onnxruntime-win-x64-1.19.2" \
             -DLINETIME_ONNXRUNTIME_STATIC=OFF \
             -DLINETIME_BUILD_WHISPER_CLI=ON
+          # Printed so a toolchain problem is diagnosable from the log alone.
+          grep -m1 'FLAGS =' build/CMakeFiles/linetime.dir/flags.make 2>/dev/null || \
+            ninja -C build -t commands linetime 2>/dev/null | head -1
           cmake --build build --target linetime whisper-cli --parallel "$(nproc)"
           test -x build/bin/linetime.exe
           test -x build/bin/whisper-cli.exe
