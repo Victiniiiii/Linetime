@@ -428,7 +428,11 @@ jobs:
           path: linetime-windows-x64-cpu.tar.gz
 
   build-windows-gpu:
-    runs-on: windows-latest
+    # Pinned rather than windows-latest: the current latest image is the VS2026
+    # variant, which resolves to Visual Studio 18, and CUDA 12.6's host_config.h
+    # rejects anything newer than Visual Studio 2022 outright. The MinGW CPU job
+    # is unaffected and stays on windows-latest.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
@@ -438,6 +442,9 @@ jobs:
       # MinGW toolchain that builds the Windows CPU bundle. The two Windows
       # artifacts are therefore built by different compilers.
       - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: '17.14'
 
       - uses: Jimver/cuda-toolkit@v0.2.36
         with:
@@ -446,6 +453,15 @@ jobs:
           cuda: '12.6.0'
           method: network
           sub-packages: '["nvcc", "cudart", "cublas", "cufft", "curand", "nvrtc"]'
+
+      - name: Report the host compiler
+        shell: pwsh
+        run: |
+          # CUDA 12.6 refuses to compile against a Visual Studio newer than 2022
+          # and says nothing about which compiler it is looking at, so it is
+          # printed here where a mismatch is obvious.
+          cl 2>&1 | Select-Object -First 2
+          nvcc --version
 
       - name: Download cuDNN 9
         shell: pwsh

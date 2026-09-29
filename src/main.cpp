@@ -4,7 +4,7 @@
 #include "lrc_writer.h"
 #include "transcriber.h"
 #include "reconcile.h"
-#include "process.h"
+#include "child_process.h"
 #include "utils.h"
 
 #include <algorithm>
