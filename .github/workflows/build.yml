@@ -441,10 +441,12 @@ jobs:
       # nvcc only accepts MSVC as its host compiler, so this job cannot share the
       # MinGW toolchain that builds the Windows CPU bundle. The two Windows
       # artifacts are therefore built by different compilers.
+      # No version filter: the action turns one into a vswhere range, and it then
+      # guesses paths like "Microsoft Visual Studio\17.14\...", which is not where
+      # Visual Studio 2022 installs. Pinning runs-on is what selects the compiler.
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-          vsversion: '17.14'
 
       - uses: Jimver/cuda-toolkit@v0.2.36
         with:
