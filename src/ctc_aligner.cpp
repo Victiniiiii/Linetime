@@ -285,7 +285,10 @@ bool CTCAligner::init(const std::string& onnx_model_path,
 #ifdef ORT_COREML
     if (provider == Provider::CoreML || provider == Provider::Auto) {
         if (provider_name == nullptr || strcmp(provider_name, "CPU") == 0) {
-            OrtStatus* cm = ort->SessionOptionsAppendExecutionProvider_CoreML(impl_->session_opts, 0);
+            // ONNX Runtime no longer exposes a CoreML-specific appender in the C
+            // API; it is registered through the generic entry point instead.
+            OrtStatus* cm = ort->SessionOptionsAppendExecutionProvider(
+                impl_->session_opts, "CoreMLExecutionProvider", nullptr, nullptr, 0);
             if (cm) {
                 ort->ReleaseStatus(cm);
             } else {
