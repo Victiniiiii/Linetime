@@ -54,6 +54,12 @@ public:
                            const LyricsDocument& lyrics,
                            float boost = 5.0f);
 
+    // True when init failed only because an explicitly requested provider was
+    // not available, as opposed to a model or tokenizer that could not be
+    // loaded. Callers use this to tell "fall back to CPU" apart from "the user
+    // asked for CUDA and there is no CUDA", which must not be silent.
+    bool provider_unavailable() const;
+
 private:
     struct Impl;
     Impl* impl_;

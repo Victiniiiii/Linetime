@@ -94,6 +94,7 @@ static int refine_with_ctc(std::vector<AlignedLine>& lines,
 
     CTCAligner ctc;
     if (!ctc.init(model_a_path, tokenizer_path, provider)) {
+        if (ctc.provider_unavailable()) return 1;
         fprintf(stderr, "  CTC refinement skipped (model not found; pass --model-a)\n");
         return 0;
     }
@@ -467,6 +468,7 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "  CTC failed: %s\n", result.error.c_str());
             }
         } else {
+            if (ctc.provider_unavailable()) return 1;
             fprintf(stderr, "  Failed to init CTC aligner (model not found?)\n");
         }
     } else {

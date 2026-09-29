@@ -206,6 +206,7 @@ struct CTCAligner::Impl {
     OrtSessionOptions* session_opts = nullptr;
     Tokenizer tokenizer;
     bool initialized = false;
+    bool provider_missing = false;
     ~Impl() {
         if (session) ort->ReleaseSession(session);
         if (session_opts) ort->ReleaseSessionOptions(session_opts);
@@ -215,6 +216,8 @@ struct CTCAligner::Impl {
 
 CTCAligner::CTCAligner() : impl_(new Impl()) {}
 CTCAligner::~CTCAligner() { delete impl_; }
+
+bool CTCAligner::provider_unavailable() const { return impl_->provider_missing; }
 
 static std::vector<float> boost_target_phonemes(
     const float* log_probs, int T, int C,
@@ -278,7 +281,14 @@ bool CTCAligner::init(const std::string& onnx_model_path,
         if (try_append_cuda(ort, impl_->session_opts)) {
             provider_name = "CUDA";
         } else if (provider == Provider::CUDA) {
-            fprintf(stderr, "[ctc] CUDA requested but not available\n");
+            // An explicit --provider cuda is a requirement, not a preference.
+            // Continuing here is what made a GPU run quietly take minutes on
+            // the CPU, because the provider is a hard DT_NEEDED of the CUDA
+            // library and cannot load without cuDNN present.
+            fprintf(stderr,
+                    "[ctc] CUDA was requested but is not available; refusing to fall back "
+                    "to the CPU. Check that the CUDA libraries sit next to this binary.\n");
+            impl_->provider_missing = true;
         }
     }
     // CoreML is macOS-only, handled via build flags (ORT_COREML)
@@ -291,12 +301,20 @@ bool CTCAligner::init(const std::string& onnx_model_path,
                 impl_->session_opts, "CoreMLExecutionProvider", nullptr, nullptr, 0);
             if (cm) {
                 ort->ReleaseStatus(cm);
+                if (provider == Provider::CoreML) {
+                    fprintf(stderr,
+                            "[ctc] CoreML was requested but is not available; refusing to "
+                            "fall back to the CPU.\n");
+                    impl_->provider_missing = true;
+                }
             } else {
                 provider_name = "CoreML";
             }
         }
     }
 #endif
+
+    if (impl_->provider_missing) return false;
 
     fprintf(stderr, "[ctc] Execution provider: %s\n", provider_name);
 
