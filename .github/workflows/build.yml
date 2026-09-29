@@ -315,28 +315,38 @@ jobs:
 
       - name: Report the C++ toolchain threading setup
         run: |
-          set -euo pipefail
-          # Every libstdc++ header that reaches <ext/atomicity> is failing to find
-          # the gthread types and falling through to gthr-default.h, the
-          # no-threads fallback. -pthread is already on the compile line, so the
-          # flag is not the cause. These facts settle whether the winpthreads
-          # headers are installed, whether this libstdc++ was configured with
-          # thread support at all, and what the include search order really is.
-          echo "== pthread.h locations =="
+          # Deliberately no "set -e": this step only reports, and a diagnostic
+          # that aborts halfway is worse than useless. The previous version
+          # stopped right after the first section because a failing [ -f ] test
+          # became the exit status of its while loop.
+          set -uo pipefail
+          # Every libstdc++ header that reaches <ext/atomicity> is falling
+          # through to gthr-default.h, the no-threads fallback, and -pthread is
+          # already on the compile line, so the flag is not the cause.
+          echo "== include search path =="
           c++ -E -Wp,-v -xc++ /dev/null 2>&1 | sed -n 's/^ *\(.*\)$/\1/p' | grep -v '^#' | while read -r d; do
-            [ -f "$d/pthread.h" ] && echo "  found: $d/pthread.h"
+            if [ -f "$d/pthread.h" ]; then echo "  pthread.h: $d"; fi
           done
-          echo "== _GLIBCXX_HAS_GTHREADS in this libstdc++ =="
+          true
+          echo "== _GLIBCXX_HAS_GTHREADS as this libstdc++ sees it =="
           c++ -E -x c++ - <<<'#include <bits/c++config.h>' 2>/dev/null \
-            | grep -E '_GLIBCXX_HAS_GTHREADS' | head -1 | sed 's/^/  /' || true
-          echo "== winpthreads and gcc packages =="
-          pacman -Q 2>/dev/null | grep -iE 'winpthreads|gcc' | sed 's/^/  /' || true
-          echo "== can <sstream> be preprocessed on its own? =="
-          if echo '#include <sstream>' | c++ -x c++ -E - -o /dev/null 2>/dev/null; then
-            echo "  <sstream> preprocesses cleanly on its own"
+            | grep -E '_GLIBCXX_HAS_GTHREADS' | head -1 | sed 's/^ */  /' || echo "  <not defined>"
+          echo "== packages =="
+          pacman -Q 2>/dev/null | grep -iE 'winpthreads|gcc' | sed 's/^/  /' || echo "  pacman unavailable"
+          echo "== does a bare <sstream> compile? =="
+          if echo 'int main(){}' | c++ -x c++ -include sstream - -o /tmp/probe.exe 2>/dev/null; then
+            echo "  YES: <sstream> compiles on its own, so the toolchain is fine"
           else
-            echo "  <sstream> FAILS on its own, so the toolchain is broken independently of this project"
+            echo "  NO: <sstream> fails with no project code, so the toolchain is broken independently of this project"
           fi
+          echo "== does a bare <thread> compile and link? =="
+          if printf '%s\n' '#include <thread>' 'int main(){ std::thread t([]{}); t.join(); }' \
+            | c++ -x c++ -pthread - -o /tmp/probe2.exe 2>/dev/null; then
+            echo "  YES: <thread> compiles and links"
+          else
+            echo "  NO: <thread> fails"
+          fi
+          true
 
       - name: Build Linetime and whisper-cli
         run: |
@@ -463,21 +473,30 @@ jobs:
           Expand-Archive -Path ort-gpu.zip -DestinationPath ort
           $ort = (Get-ChildItem ort -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1).FullName
           if (-not $ort) { throw 'ONNX Runtime GPU package has no lib directory' }
+          # Ninja rather than the Visual Studio generator: msvc-dev-cmd puts the
+          # toolchain on PATH but the VS generator still looks the install up in
+          # the registry, which it could not find here. Ninja uses the
+          # environment that was already set up for it.
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { throw 'ninja is not on PATH' }
+          (Get-Command ninja).Source
           # "native" cannot be used because the runner has no GPU to detect, so
           # the architectures are listed: Turing, Ampere, Ada and Hopper.
           cmake -S . -B build-gpu `
-            -G "Visual Studio 17 2022" -A x64 `
+            -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" `
             -DLINETIME_ONNXRUNTIME_DIR="$ort" `
             -DLINETIME_ONNXRUNTIME_STATIC=OFF `
             -DLINETIME_ENABLE_CUDA=ON `
             -DLINETIME_BUILD_WHISPER_CLI=ON
-          cmake --build build-gpu --config Release --target linetime whisper-cli --parallel
-          if (-not (Test-Path build-gpu/bin/Release/linetime.exe)) { throw 'linetime.exe was not produced' }
-          if (-not (Test-Path build-gpu/bin/Release/whisper-cli.exe)) { throw 'whisper-cli.exe was not produced' }
-          & build-gpu/bin/Release/linetime.exe --help
-          if (dumpbin /dependents build-gpu/bin/Release/linetime.exe | Select-String 'libwhisper|libggml') {
+          cmake --build build-gpu --target linetime whisper-cli --parallel
+          # Ninja is single-config, so the binaries land in bin/ with no
+          # per-configuration subdirectory.
+          Get-ChildItem build-gpu -Recurse -Filter '*.exe' | Select-Object -ExpandProperty FullName
+          if (-not (Test-Path build-gpu/bin/linetime.exe)) { throw 'linetime.exe was not produced' }
+          if (-not (Test-Path build-gpu/bin/whisper-cli.exe)) { throw 'whisper-cli.exe was not produced' }
+          & build-gpu/bin/linetime.exe --help
+          if (dumpbin /dependents build-gpu/bin/linetime.exe | Select-String 'libwhisper|libggml') {
             throw 'Linetime links a Whisper library directly'
           }
 
@@ -496,8 +515,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Copy-Item build-gpu/bin/Release/linetime.exe linetime-windows-x64-gpu.exe
-          Copy-Item build-gpu/bin/Release/whisper-cli.exe whisper-cli.exe
+          Copy-Item build-gpu/bin/linetime.exe linetime-windows-x64-gpu.exe
+          Copy-Item build-gpu/bin/whisper-cli.exe whisper-cli.exe
           $ort = (Get-ChildItem ort -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1).FullName
           # The Windows loader searches the executable's own directory, so the
           # DLLs go beside linetime.exe rather than into a lib subfolder as they
