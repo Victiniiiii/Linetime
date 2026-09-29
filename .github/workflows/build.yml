@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  build-linux:
+  build-linux-cpu:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,19 +52,19 @@ jobs:
       - name: Verify archive contents
         run: |
           set -euo pipefail
-          cp build/bin/linetime linetime-linux-x64
+          cp build/bin/linetime linetime-linux-x64-cpu
           cp build/bin/whisper-cli whisper-cli
-          tar -czf linetime-linux-x64.tar.gz linetime-linux-x64 whisper-cli ffmpeg
-          test -f linetime-linux-x64.tar.gz
-          archive_listing="$(tar -tzf linetime-linux-x64.tar.gz)"
-          for required in linetime-linux-x64 whisper-cli ffmpeg; do
+          tar -czf linetime-linux-x64-cpu.tar.gz linetime-linux-x64-cpu whisper-cli ffmpeg
+          test -f linetime-linux-x64-cpu.tar.gz
+          archive_listing="$(tar -tzf linetime-linux-x64-cpu.tar.gz)"
+          for required in linetime-linux-x64-cpu whisper-cli ffmpeg; do
             printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linetime-linux-x64
-          path: linetime-linux-x64.tar.gz
+          name: linetime-linux-x64-cpu
+          path: linetime-linux-x64-cpu.tar.gz
 
   build-linux-gpu:
     runs-on: ubuntu-latest
@@ -297,7 +297,7 @@ jobs:
           name: linetime-macos-universal
           path: linetime-macos-universal.tar.gz
 
-  build-windows:
+  build-windows-cpu:
     runs-on: windows-latest
     defaults:
       run:
@@ -360,7 +360,7 @@ jobs:
       - name: Bundle runtime DLLs
         run: |
           set -euo pipefail
-          cp build/bin/linetime.exe linetime-windows-x64.exe
+          cp build/bin/linetime.exe linetime-windows-x64-cpu.exe
           cp build/bin/whisper-cli.exe whisper-cli.exe
           cp onnxruntime-win-x64-1.19.2/lib/*.dll .
           for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
@@ -379,22 +379,144 @@ jobs:
       - name: Verify archive contents
         run: |
           set -euo pipefail
-          ./linetime-windows-x64.exe --help
-          tar -czf linetime-windows-x64.tar.gz \
-            linetime-windows-x64.exe whisper-cli.exe ffmpeg.exe *.dll
-          archive_listing="$(tar -tzf linetime-windows-x64.tar.gz)"
-          for required in linetime-windows-x64.exe whisper-cli.exe ffmpeg.exe onnxruntime.dll; do
+          ./linetime-windows-x64-cpu.exe --help
+          tar -czf linetime-windows-x64-cpu.tar.gz \
+            linetime-windows-x64-cpu.exe whisper-cli.exe ffmpeg.exe *.dll
+          archive_listing="$(tar -tzf linetime-windows-x64-cpu.tar.gz)"
+          for required in linetime-windows-x64-cpu.exe whisper-cli.exe ffmpeg.exe onnxruntime.dll; do
             printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linetime-windows-x64
-          path: linetime-windows-x64.tar.gz
+          name: linetime-windows-x64-cpu
+          path: linetime-windows-x64-cpu.tar.gz
+
+  build-windows-gpu:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # nvcc only accepts MSVC as its host compiler, so this job cannot share the
+      # MinGW toolchain that builds the Windows CPU bundle. The two Windows
+      # artifacts are therefore built by different compilers.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.6'
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cufft", "curand", "nvrtc"]'
+
+      - name: Download cuDNN 9
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 9.6 is the cuDNN 9 release contemporaneous with CUDA 12.6. cuDNN is a
+          # hard dependency of the ONNX Runtime CUDA provider, so omitting it does
+          # not degrade the build, it stops the provider loading at all.
+          $url = 'https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.6.0.74_cuda12-archive.zip'
+          Invoke-WebRequest -Uri $url -OutFile cudnn.zip
+          Expand-Archive -Path cudnn.zip -DestinationPath cudnn
+          New-Item -ItemType Directory -Force -Path vendor/cudnn | Out-Null
+          Copy-Item (Join-Path (Get-ChildItem cudnn -Directory | Select-Object -First 1).FullName 'bin/*.dll') vendor/cudnn/
+          if (-not (Get-ChildItem vendor/cudnn -Filter 'cudnn*.dll')) {
+            Get-ChildItem -Recurse cudnn -Filter '*.dll' | Select-Object -First 20 FullName
+            throw 'No cuDNN DLLs were extracted'
+          }
+          Get-ChildItem vendor/cudnn | Select-Object -ExpandProperty Name
+
+      - name: Build Linetime and whisper-cli
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -fSL -o ort-gpu.zip https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-gpu-1.19.2.zip
+          Expand-Archive -Path ort-gpu.zip -DestinationPath ort
+          $ort = (Get-ChildItem ort -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1).FullName
+          if (-not $ort) { throw 'ONNX Runtime GPU package has no lib directory' }
+          # "native" cannot be used because the runner has no GPU to detect, so
+          # the architectures are listed: Turing, Ampere, Ada and Hopper.
+          cmake -S . -B build-gpu `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" `
+            -DLINETIME_ONNXRUNTIME_DIR="$ort" `
+            -DLINETIME_ONNXRUNTIME_STATIC=OFF `
+            -DLINETIME_ENABLE_CUDA=ON `
+            -DLINETIME_BUILD_WHISPER_CLI=ON
+          cmake --build build-gpu --config Release --target linetime whisper-cli --parallel
+          if (-not (Test-Path build-gpu/bin/Release/linetime.exe)) { throw 'linetime.exe was not produced' }
+          if (-not (Test-Path build-gpu/bin/Release/whisper-cli.exe)) { throw 'whisper-cli.exe was not produced' }
+          & build-gpu/bin/Release/linetime.exe --help
+          if (dumpbin /dependents build-gpu/bin/Release/linetime.exe | Select-String 'libwhisper|libggml') {
+            throw 'Linetime links a Whisper library directly'
+          }
+
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -fSL -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg
+          $exe = (Get-ChildItem -Recurse ffmpeg -Filter 'ffmpeg.exe' | Select-Object -First 1).FullName
+          if (-not $exe) { throw 'ffmpeg.exe not found in the archive' }
+          Copy-Item $exe ffmpeg.exe
+          & .\ffmpeg.exe -version
+
+      - name: Bundle CUDA runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item build-gpu/bin/Release/linetime.exe linetime-windows-x64-gpu.exe
+          Copy-Item build-gpu/bin/Release/whisper-cli.exe whisper-cli.exe
+          $ort = (Get-ChildItem ort -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1).FullName
+          # The Windows loader searches the executable's own directory, so the
+          # DLLs go beside linetime.exe rather than into a lib subfolder as they
+          # do on Linux. There is no LD_LIBRARY_PATH on this platform.
+          Copy-Item (Join-Path $ort 'lib/*.dll') .
+          Copy-Item vendor/cudnn/*.dll .
+          $cudaBin = Join-Path $env:CUDA_PATH 'bin'
+          foreach ($dll in 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'curand64_10.dll', 'cufft64_11.dll') {
+            Copy-Item (Join-Path $cudaBin $dll) .
+          }
+          $crt = Join-Path $env:VCToolsRedistDir 'x64/Microsoft.VC143.CRT'
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item (Join-Path $crt $dll) .
+          }
+          $required = 'onnxruntime.dll', 'onnxruntime_providers_cuda.dll', 'onnxruntime_providers_shared.dll',
+                      'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'curand64_10.dll', 'cufft64_11.dll'
+          $missing = @()
+          foreach ($dll in $required) { if (-not (Test-Path $dll)) { $missing += $dll } }
+          if (-not (Get-ChildItem -Filter 'cudnn64_9.dll')) { $missing += 'cudnn64_9.dll' }
+          if ($missing) {
+            Get-ChildItem -Filter '*.dll' | Select-Object -ExpandProperty Name
+            throw "Not bundled: $($missing -join ', ')"
+          }
+          Get-ChildItem -Filter '*.dll' | Measure-Object -Property Length -Sum |
+            ForEach-Object { "DLLs bundled: $($_.Count) ($([math]::Round($_.Sum / 1MB)) MB)" }
+
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\linetime-windows-x64-gpu.exe --help
+          tar -czf linetime-windows-x64-gpu.zip `
+            linetime-windows-x64-gpu.exe whisper-cli.exe ffmpeg.exe *.dll
+          $listing = tar -tzf linetime-windows-x64-gpu.zip
+          foreach ($required in 'linetime-windows-x64-gpu.exe', 'whisper-cli.exe', 'ffmpeg.exe', 'onnxruntime.dll') {
+            if ($listing -notcontains $required) { throw "Archive is missing $required" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-windows-x64-gpu
+          path: linetime-windows-x64-gpu.zip
 
   release:
     if: github.ref_type == 'tag'
-    needs: [build-linux, build-linux-gpu, build-macos, build-windows]
+    needs: [build-linux-cpu, build-linux-gpu, build-macos, build-windows-cpu, build-windows-gpu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -405,8 +527,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            linetime-linux-x64/linetime-linux-x64.tar.gz
+            linetime-linux-x64-cpu/linetime-linux-x64-cpu.tar.gz
             linetime-linux-x64-gpu/linetime-linux-x64-gpu.tar.gz
             linetime-macos-universal/linetime-macos-universal.tar.gz
-            linetime-windows-x64/linetime-windows-x64.tar.gz
+            linetime-windows-x64-cpu/linetime-windows-x64-cpu.tar.gz
+            linetime-windows-x64-gpu/linetime-windows-x64-gpu.zip
           generate_release_notes: true
