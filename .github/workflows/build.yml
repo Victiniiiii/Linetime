@@ -92,8 +92,15 @@ jobs:
       - name: Build Linetime and whisper-cli
         run: |
           set -euo pipefail
+          # The CUDA toolkit package puts nvcc outside PATH, so CMake finds the
+          # headers but fails enable_language(CUDA) with "No CMAKE_CUDA_COMPILER
+          # could be found". Point it at the compiler explicitly.
+          CUDACXX=/usr/local/cuda/bin/nvcc
+          test -x "$CUDACXX" || { echo "nvcc not found at $CUDACXX" >&2; exit 1; }
           cmake -S . -B build-gpu \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER="$CUDACXX" \
+            -DCMAKE_CUDA_ARCHITECTURES="native" \
             -DLINETIME_ONNXRUNTIME_DIR="$PWD/vendor/onnxruntime-gpu" \
             -DLINETIME_ONNXRUNTIME_STATIC=OFF \
             -DLINETIME_ENABLE_CUDA=ON \

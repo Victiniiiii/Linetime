@@ -42,6 +42,7 @@ if(NOT LINETIME_ONNXRUNTIME_INCLUDE_DIRS)
     message(FATAL_ERROR "ONNX Runtime headers were not found in ${LINETIME_ONNXRUNTIME_DIR}")
 endif()
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 find_package(ZLIB)
 
@@ -153,6 +154,13 @@ if(ZLIB_FOUND AND NOT WIN32)
 endif()
 
 add_executable(linetime ${LINETIME_SOURCES})
+# MinGW's libstdc++ only declares __gthread_once_t and friends when the
+# winpthreads flag is present, so <thread> and <filesystem> fail to parse
+# without it. Do not rely on FindThreads to add it for that toolchain.
+if(MINGW)
+    target_compile_options(linetime PRIVATE -pthread)
+    target_link_options(linetime PRIVATE -pthread)
+endif()
 target_include_directories(linetime PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/vendor"
