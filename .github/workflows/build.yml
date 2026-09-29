@@ -73,13 +73,18 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install CUDA 12 toolkit
+      - name: Install CUDA 12 toolkit and cuDNN 9
         run: |
           set -euo pipefail
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
-          sudo apt-get install -y cuda-toolkit-12-6
+          # cuDNN is not part of cuda-toolkit, and the runner image's preinstalled
+          # copy is version 8. ONNX Runtime 1.19's CUDA provider links against
+          # cuDNN 9, so without this lib/libcudnn.so.9 is never collected and the
+          # published bundle cannot load the provider.
+          sudo apt-get install -y cuda-toolkit-12-6 libcudnn9-cuda-12
+          test -e /usr/lib/x86_64-linux-gnu/libcudnn.so.9
 
       - name: Download ONNX Runtime GPU
         run: |
@@ -158,6 +163,7 @@ jobs:
               done
             done
           done
+          missing=
           for required_library in \
             libonnxruntime.so.1 \
             libonnxruntime_providers_cuda.so \
@@ -168,10 +174,25 @@ jobs:
             libcurand.so.10 \
             libcufft.so.11 \
             libcudnn.so.9; do
-            test -e "lib/$required_library"
+            [ -e "lib/$required_library" ] || missing="$missing $required_library"
           done
-          LD_LIBRARY_PATH="$PWD/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-            build-gpu/bin/linetime --help
+          if [ -n "$missing" ]; then
+            # set -e on a bare test hides which library was the problem, and this
+            # step is the only thing standing between a silent bad bundle and a
+            # user's aligner failing to start.
+            echo "Not collected into the bundle:$missing" >&2
+            echo "Collected instead:" >&2
+            ls -1 lib >&2
+            exit 1
+          fi
+          # A library can be present and still be the wrong ABI, so the built
+          # binary has to actually start against this directory alone.
+          if ! LD_LIBRARY_PATH="$PWD/lib" build-gpu/bin/linetime --help; then
+            echo "linetime did not start against the bundled libraries" >&2
+            ldd build-gpu/bin/linetime >&2 || true
+            LD_LIBRARY_PATH="$PWD/lib" ldd build-gpu/bin/whisper-cli >&2 || true
+            exit 1
+          fi
 
       - name: Verify archive contents
         run: |
