@@ -454,16 +454,28 @@ jobs:
           # rejects a bare "12.6".
           cuda: '12.6.0'
           method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "cufft", "curand", "nvrtc"]'
 
-      - name: Report the host compiler
+      - name: Report the CUDA toolkit contents
         shell: pwsh
         run: |
-          # CUDA 12.6 refuses to compile against a Visual Studio newer than 2022
-          # and says nothing about which compiler it is looking at, so it is
-          # printed here where a mismatch is obvious.
-          cl 2>&1 | Select-Object -First 2
+          $ErrorActionPreference = 'Stop'
+          # The toolkit is installed whole rather than by sub-package. A partial
+          # install still gives CMake a working CUDAToolkit package, so the
+          # failure only surfaces much later as "CUDA::cublas not found" inside
+          # ggml, which does not connect it to the install. Verifying the exact
+          # pieces we link against keeps that failure here.
           nvcc --version
+          cl 2>&1 | Select-Object -First 2
+          $needed = 'lib\x64\cublas.lib', 'lib\x64\cublasLt.lib', 'lib\x64\cudart.lib',
+                    'lib\x64\curand.lib', 'lib\x64\cufft.lib',
+                    'bin\cublas64_12.dll', 'bin\cublasLt64_12.dll', 'bin\cudart64_12.dll',
+                    'bin\curand64_10.dll', 'bin\cufft64_11.dll'
+          $missing = @()
+          foreach ($f in $needed) {
+            $p = Join-Path $env:CUDA_PATH $f
+            if (Test-Path $p) { "  present: $f" } else { $missing += $f }
+          }
+          if ($missing) { throw "CUDA toolkit is incomplete, missing: $($missing -join ', ')" }
 
       - name: Download cuDNN 9
         shell: pwsh
