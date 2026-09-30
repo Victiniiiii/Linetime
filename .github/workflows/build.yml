@@ -215,10 +215,31 @@ jobs:
           done
           printf '%s\n' "$archive_listing" | grep -E '^lib/[^/]+' >/dev/null
 
+      # Also published on its own, because the app lets a user install the CUDA
+      # whisper-cli without also taking the multi-gigabyte aligner bundle. Upstream
+      # whisper.cpp publishes a CUDA build for Windows but none for Linux, so this
+      # is the only way a Linux user can get one. It is a single file: BUILD_SHARED_LIBS
+      # is off, so the ggml and CUDA code is linked in statically.
+      - name: Package the CUDA whisper-cli on its own
+        run: |
+          set -euo pipefail
+          cp build-gpu/bin/whisper-cli whisper-cli
+          tar -czf linetime-whisper-cli-cuda-x64.tar.gz whisper-cli
+          test -f linetime-whisper-cli-cuda-x64.tar.gz
+          tar -tzf linetime-whisper-cli-cuda-x64.tar.gz | grep -Fx 'whisper-cli' >/dev/null
+          # Must actually be a CUDA build, or a user installs it and silently gets
+          # the CPU. Only a real CUDA link reports libcublas/libcudart.
+          ldd whisper-cli | grep -Eq 'libcublas|libcudart'
+
       - uses: actions/upload-artifact@v4
         with:
           name: linetime-linux-x64-gpu
           path: linetime-linux-x64-gpu.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-whisper-cli-cuda-x64
+          path: linetime-whisper-cli-cuda-x64.tar.gz
 
   build-macos:
     runs-on: macos-latest
@@ -594,10 +615,46 @@ jobs:
             if ($listing -notcontains $required) { throw "Archive is missing $required" }
           }
 
+      # The CUDA whisper-cli on its own, so a user can add GPU transcription without
+      # also downloading the aligner. It needs the CUDA DLLs beside it because the
+      # Windows loader searches the executable's own directory, but not the ONNX
+      # Runtime or cuDNN ones, which only the aligner uses. This is built here rather
+      # than fetched from upstream because upstream's cublas bundle is 675 MB and is
+      # mostly DLLs this archive already carries.
+      - name: Package the CUDA whisper-cli on its own
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'whisper-cli-cuda'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item build-gpu/bin/whisper-cli.exe (Join-Path $stage 'whisper-cli.exe')
+          foreach ($dll in 'cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll',
+                            'curand64_10.dll', 'cufft64_11.dll') {
+            Copy-Item (Join-Path $env:CUDA_PATH "bin/$dll") (Join-Path $stage $dll)
+          }
+          $crt = Join-Path $env:VCToolsRedistDir 'x64/Microsoft.VC143.CRT'
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item (Join-Path $crt $dll) (Join-Path $stage $dll)
+          }
+          $listing = Get-ChildItem $stage | Select-Object -ExpandProperty Name
+          foreach ($required in 'whisper-cli.exe', 'cudart64_12.dll', 'cublas64_12.dll') {
+            if ($listing -notcontains $required) { throw "Standalone CLI is missing $required" }
+          }
+          # Must be a real CUDA build, or a user installs it and silently gets the CPU.
+          $deps = (dumpbin /dependents build-gpu/bin/whisper-cli.exe | Out-String)
+          if ($deps -notmatch 'cublas|cudart') { throw 'whisper-cli.exe has no CUDA dependency' }
+          tar -czf linetime-whisper-cli-cuda-x64-windows.zip -C $stage .
+          if (-not (Test-Path linetime-whisper-cli-cuda-x64-windows.zip)) { throw 'archive not written' }
+
       - uses: actions/upload-artifact@v4
         with:
           name: linetime-windows-x64-gpu
           path: linetime-windows-x64-gpu.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linetime-whisper-cli-cuda-x64-windows
+          path: linetime-whisper-cli-cuda-x64-windows.zip
 
   release:
     if: github.ref_type == 'tag'
@@ -617,4 +674,6 @@ jobs:
             linetime-macos-universal/linetime-macos-universal.tar.gz
             linetime-windows-x64-cpu/linetime-windows-x64-cpu.tar.gz
             linetime-windows-x64-gpu/linetime-windows-x64-gpu.zip
+            linetime-whisper-cli-cuda-x64/linetime-whisper-cli-cuda-x64.tar.gz
+            linetime-whisper-cli-cuda-x64-windows/linetime-whisper-cli-cuda-x64-windows.zip
           generate_release_notes: true
