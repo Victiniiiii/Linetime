@@ -23,6 +23,45 @@
 
 namespace fs = std::filesystem;
 
+// Non-lyrical vocals. Whisper has to emit something for every 30s window, so a
+// hum becomes "ha ha ha" and a silent tail becomes a credit line. The distinction
+// that matters is whether any *word* was recognised: a hum yields interjections at
+// most, while a real lyric yields words with word-level timings. This is checked on
+// the word list rather than the text, because "ha ha ha" is three words in the
+// transcript and would otherwise look like content.
+static bool is_interjection_word(const std::string& w) {
+    static const char* const kInterjections[] = {
+        "ha", "haha", "hahaha", "ah", "ahh", "eh", "hm", "hmm", "hmmm",
+        "la", "lalala", "nana", "na", "nanana", "da", "dada", "ta", "tata",
+        "oh", "ooh", "ooh ooh", "woo", "woohoo", "hey", "he", "heh", "ho",
+        "mmm", "mm", "mhm", "huh", "yay", "yeah", "yay yeah",
+        nullptr
+    };
+    std::string n = utils::normalize(w);
+    if (n.empty()) return false;
+    for (int i = 0; kInterjections[i]; i++) {
+        if (n == kInterjections[i]) return true;
+    }
+    return false;
+}
+
+// True when nothing recognisable was transcribed for this segment. Reported to the
+// caller as [humming] rather than dropped, so the timing of a vocal passage that
+// carries no words survives into the LRC instead of leaving a silent gap.
+static bool segment_has_no_words(const WhisperSegment& seg) {
+    // A credit line or a real lyric both produce words here. Only a hum, an
+    // instrumental passage or a silence produces none, and those are the cases the
+    // placeholder exists for.
+    for (const auto& w : seg.words) {
+        if (!is_interjection_word(w.text)) return false;
+    }
+    return true;
+}
+
+// The placeholder written for such a segment. Bracketed so it is obviously not a
+// lyric and is easy to find and edit by hand afterwards.
+static const char* kNonLyricPlaceholder = "[humming]";
+
 static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& trans) {
     std::vector<AlignedLine> out;
     for (const auto& seg : trans.segments) {
@@ -50,6 +89,11 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
         }
         if (clean.empty()) continue;
 
+        // A segment with no recognisable words keeps its slot in the timeline as a
+        // placeholder, and carries no align_text so CTC is not asked to force a
+        // word onto a hum it cannot place.
+        const bool non_lyric = segment_has_no_words(seg);
+
         float conf_sum = 0.0f;
         int conf_n = 0;
         for (const auto& w : seg.words) {
@@ -62,8 +106,8 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
         al.start_ms = seg.start_ms;
         al.end_ms = seg.end_ms;
         al.confidence = conf_n > 0 ? conf_sum / conf_n : 0.0f;
-        al.text = clean;
-        al.align_text = clean;
+        al.text = non_lyric ? kNonLyricPlaceholder : clean;
+        al.align_text = non_lyric ? "" : clean;
         out.push_back(std::move(al));
     }
     return out;
@@ -80,9 +124,15 @@ static int refine_with_ctc(std::vector<AlignedLine>& lines,
     std::vector<size_t> keep_idx;
     for (size_t i = 0; i < lines.size(); i++) {
         if (lines[i].text.empty()) continue;
+        // A non-lyric placeholder has no word to align, so it is skipped here and
+        // keeps the whisper timestamp it arrived with. Falling back to `text` for an
+        // empty align_text would hand the literal string "[humming]" to CTC to force
+        // onto audio, which is exactly the work this placeholder avoids.
+        std::string align_text = lines[i].align_text.empty() ? lines[i].text : lines[i].align_text;
+        if (align_text == kNonLyricPlaceholder) continue;
         LyricLine ll;
         ll.index = (int)refined.lines.size();
-        ll.text = lines[i].align_text.empty() ? lines[i].text : lines[i].align_text;
+        ll.text = align_text;
         ll.normalized = ll.text;
         ll.is_ref = false;
         ll.is_expanded = false;
