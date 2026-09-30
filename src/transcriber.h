@@ -22,6 +22,14 @@ struct WhisperSegment {
 
 struct TranscriptionResult {
     std::string language;
+    // whisper's own account of what backends it loaded, e.g.
+    // "WHISPER : ... | CUDA : ARCHS = 610 | ...". Read from the output JSON so a
+    // GPU request can be verified rather than assumed.
+    std::string systeminfo;
+    // True only when whisper's own CUDA backend reported finding a device. Set from
+    // the child's stderr, not from the flags it was given, because a CPU build
+    // accepts the same flags and still runs on the CPU.
+    bool gpu_confirmed = false;
     std::vector<WhisperSegment> segments;
     bool success = false;
     std::string error;

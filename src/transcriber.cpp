@@ -268,6 +268,9 @@ TranscriptionResult load_transcription_json(const std::string& json_path) {
     }
 
     result.language = root["result"]["language"].as_string();
+    if (root["systeminfo"].type == JsonValue::String) {
+        result.systeminfo = root["systeminfo"].as_string();
+    }
 
     const JsonValue& transcription = root["transcription"];
     if (transcription.type != JsonValue::Array) {
@@ -563,18 +566,52 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
             // and it then repeats for the whole track, so it is disabled.
             "-mc", "0",
             // Drops [MUSIC], [BLINK] and similar non-speech artefacts.
-            "-sns",
-            "-np"
+            "-sns"
+            // Note: -np is deliberately not passed. It suppresses whisper's own
+            // stderr, which includes the ggml_cuda_init line that is the only
+            // reliable proof the run used the GPU. Passing it made every GPU run
+            // look unverified, because the confirmation it depends on is exactly
+            // what -np hides. progress_output() below drops the per-segment lines
+            // from stderr instead, so the user-facing output is unchanged.
         };
         if (provider == Provider::CPU)
             arguments.push_back("-ng");
 
-        fprintf(stderr, "[transcriber] Running: %s\n", whisper_cli_path.c_str());
-        process::Result execution = process::run(arguments, environment_additions);
-        if (!execution.started) {
-            result.error = "failed to run whisper-cli: " + execution.error;
-            return result;
-        }
+          fprintf(stderr, "[transcriber] Running: %s\n", whisper_cli_path.c_str());
+          process::Result execution = process::run(arguments, environment_additions);
+          // ggml_cuda_init reports the devices it found on stderr, and only when the
+          // CUDA backend actually initialised. This is the only signal that
+          // distinguishes a real GPU run from a CPU build that merely mentions CUDA
+          // in its banner, so it is captured from the child's own output rather than
+          // guessed from the flags passed to it.
+          if (execution.stderr_data.find("ggml_cuda_init: found") != std::string::npos) {
+              result.gpu_confirmed = true;
+          }
+          // whisper narrates every 30s window it decodes. Those lines are progress
+          // noise in the middle of our own stage output, so they are dropped here
+          // rather than by asking whisper to stay quiet, because the one line we
+          // need from it is on the same stream.
+          {
+              size_t at = 0;
+              const std::string& data = execution.stderr_data;
+              while (at < data.size()) {
+                  size_t end = data.find('\n', at);
+                  if (end == std::string::npos) end = data.size();
+                  const std::string line = data.substr(at, end - at);
+                  if (line.rfind("whisper_print_segment_callback", 0) != 0 &&
+                      line.rfind("[print]", 0) != 0 &&
+                      line.find("whisper_full_with_state: segment") == std::string::npos &&
+                      !line.empty()) {
+                      fputs(line.c_str(), stderr);
+                      fputc('\n', stderr);
+                  }
+                  at = end + 1;
+              }
+          }
+          if (!execution.started) {
+              result.error = "failed to run whisper-cli: " + execution.error;
+              return result;
+          }
         if (execution.exit_code != 0 || !execution.error.empty()) {
             result.error = "whisper-cli failed (exit " +
                            std::to_string(execution.exit_code) + "): " +
@@ -584,8 +621,33 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
             return result;
         }
 
-        TranscriptionResult parsed = load_transcription_json(json_path.string());
-        if (!parsed.success) return parsed;
+          TranscriptionResult parsed = load_transcription_json(json_path.string());
+          if (!parsed.success) return parsed;
+
+          // A GPU run that quietly used the CPU is worse than a failed one: it
+          // looks like it worked and takes minutes instead of seconds.
+          //
+          // Checking systeminfo for the word "CUDA" is not enough, and was tried
+          // first: a CPU-only build still prints the CUDA line of that template,
+          // listing which architectures it would support, so the string is present
+          // either way and the check passed a build with no CUDA in it at all.
+          //
+          // What differs is what whisper actually loaded, so that is what is asked:
+          // ggml_cuda_init prints "found N CUDA devices" only when the CUDA backend
+          // initialises against a real device, and use_gpu says whether it was
+          // asked to. A build without CUDA prints neither.
+          if (provider == Provider::CUDA) {
+                if (result.gpu_confirmed) {
+                  fprintf(stderr, "[transcriber] GPU confirmed: %s\n",
+                          parsed.systeminfo.c_str());
+              } else {
+                  result.error =
+                      "whisper-cli ran without CUDA, so this was not a GPU run. The "
+                      "whisper-cli in use has no CUDA build, or no accelerator was "
+                      "found. Refusing to return a CPU result for a GPU request.";
+                  return result;
+              }
+          }
         try {
             cache_transcript(json_path, cache_name);
         } catch (const std::exception& exception) {
