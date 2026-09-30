@@ -1,8 +1,17 @@
 name: Build
 
 on:
+  # A plain push builds nothing. The release job needs a tag to produce a
+  # release anyway, and building all six targets on every commit means every
+  # work-in-progress push pays for a Windows GPU compile that takes longer than
+  # the rest of the matrix combined.
   push:
+    tags:
+      - 'v*'
   pull_request:
+  # Re-running a build without pushing anything new, which is the only other
+  # thing that should be able to start one.
+  workflow_dispatch:
 
 permissions:
   contents: read
