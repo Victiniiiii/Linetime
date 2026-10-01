@@ -23,7 +23,8 @@ static std::string find_ffmpeg() {
     return "ffmpeg";
 }
 
-AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path) {
+AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path,
+                       bool separate_vocals) {
     AudioBuffer result;
     std::string ffmpeg = ffmpeg_path.empty() ? find_ffmpeg() : ffmpeg_path;
     if (ffmpeg.empty()) {
@@ -43,6 +44,16 @@ AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path) 
         "-loglevel", "error",
         "-"
     };
+
+    if (separate_vocals) {
+        // Sum the channels instead of taking one, which keeps whatever is
+        // positioned centrally and cancels the wide stereo parts. On the test set
+        // the centre sat 10-15 dB above the sides, so the accompaniment really does
+        // drop back. It is inserted before the format conversion so it works on the
+        // original channel layout.
+        arguments.insert(arguments.end() - 1,
+                         {"-af", "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1"});
+    }
     process::Result execution = process::run(arguments);
     if (!execution.started) {
         fprintf(stderr, "[audio] Failed to run ffmpeg for %s: %s\n",
@@ -80,11 +91,13 @@ AudioBuffer load_audio(const std::string& path, const std::string& ffmpeg_path) 
     result.n_samples = static_cast<int>(sample_count);
     result.duration_sec = static_cast<double>(result.n_samples) / 16000.0;
 
-    fprintf(stderr, "[audio] Loaded %s: %d samples, %.1f sec, 16kHz mono\n",
-            path.c_str(), result.n_samples, result.duration_sec);
+    fprintf(stderr, "[audio] Loaded %s: %d samples, %.1f sec, 16kHz mono%s\n",
+            path.c_str(), result.n_samples, result.duration_sec,
+            separate_vocals ? " (centre channel only)" : "");
     return result;
 }
 
-AudioBuffer load_wav_16k_mono(const std::string& path, const std::string& ffmpeg_path) {
-    return load_audio(path, ffmpeg_path);
+AudioBuffer load_wav_16k_mono(const std::string& path, const std::string& ffmpeg_path,
+                              bool separate_vocals) {
+    return load_audio(path, ffmpeg_path, separate_vocals);
 }

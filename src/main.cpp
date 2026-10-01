@@ -304,6 +304,8 @@ void print_usage() {
         "  --min-confidence <float> Drop lines with alignment confidence below\n"
         "                           this value (0-1, default: 0)\n"
         "  --recover-missing        Re-emit sung sections the lyrics omit\n"
+        "  --separate-vocals      Keep only the centre channel (default on for method b)\n"
+        "  --no-separate-vocals   Use the full mix instead\n"
         "  --method <a|b|c>         Alignment method (default: a, or b without lyrics)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
         "  --gpu                    Use GPU acceleration (auto-detect CUDA/CoreML)\n"
@@ -342,6 +344,12 @@ int main(int argc, char** argv) {
     float min_conf = 0.0f;
     bool verbose = false;
     bool recover_missing = false;
+    bool separate_vocals = false;
+    // Method b defaults to isolating the centre channel, since a lyric-only
+    // transcription benefits from the accompaniment dropping away. A and C do not:
+    // A is CTC-only and never transcribes, and C already has the lyric text as an
+    // authority, so re-deriving what is sung would only add risk.
+    bool separate_vocals_set = false;
     std::vector<std::string> positionals;
 
     for (int i = 1; i < argc; i++) {
@@ -393,8 +401,14 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--verbose") {
             verbose = true;
-        } else if (arg == "--recover-missing") {
-            recover_missing = true;
+} else if (arg == "--recover-missing") {
+              recover_missing = true;
+          } else if (arg == "--separate-vocals") {
+              separate_vocals = true;
+              separate_vocals_set = true;
+          } else if (arg == "--no-separate-vocals") {
+              separate_vocals = false;
+              separate_vocals_set = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             return 0;
@@ -452,7 +466,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    fs::path executable_dir(process::executable_directory(argc > 0 ? argv[0] : nullptr));
+    if (!separate_vocals_set) {
+          // Only method b, which has to work out the lyrics from the audio alone,
+          // gains anything from dropping the accompaniment. Method a never runs a
+          // transcription and method c already has the lyric text, so both are left
+          // on the full mix.
+          separate_vocals = (method == "b");
+          if (separate_vocals) {
+              fprintf(stderr, "Method b: isolating the centre channel (--no-separate-vocals to disable)\n");
+          }
+      }
+
+      fs::path executable_dir(process::executable_directory(argc > 0 ? argv[0] : nullptr));
     if (model_a_path.empty())
         model_a_path = runtime_file(executable_dir, "models/mms_multilingual.onnx");
     if (model_c_path.empty())
@@ -483,7 +508,7 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "[1/5] Loading audio...\n");
     utils::report_progress(5, "Loading audio");
-    AudioBuffer audio = load_audio(audio_path, ffmpeg_path);
+    AudioBuffer audio = load_audio(audio_path, ffmpeg_path, separate_vocals);
     if (audio.n_samples == 0) {
         fprintf(stderr, "Error: failed to load audio\n");
         return 1;
