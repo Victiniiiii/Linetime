@@ -6,6 +6,7 @@
 #include "reconcile.h"
 #include "child_process.h"
 #include "utils.h"
+#include "whisper_markers.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -51,9 +52,12 @@ static bool is_interjection_word(const std::string& w) {
 static bool segment_has_no_words(const WhisperSegment& seg) {
     // A credit line or a real lyric both produce words here. Only a hum, an
     // instrumental passage or a silence produces none, and those are the cases the
-    // placeholder exists for.
+    // placeholder exists for. A segment made entirely of stage directions
+    // ([MUSIC], "Музика") is the same situation wearing different words, so it is
+    // caught by the same test rather than a separate one.
     for (const auto& w : seg.words) {
-        if (!is_interjection_word(w.text)) return false;
+        if (!is_interjection_word(w.text) && !whisper_markers::is_marker(w.text))
+            return false;
     }
     return true;
 }
@@ -64,7 +68,18 @@ static const char* kNonLyricPlaceholder = "[humming]";
 
 static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& trans) {
     std::vector<AlignedLine> out;
+    int dropped_markers = 0;
     for (const auto& seg : trans.segments) {
+        // A segment whose recognised words are all stage directions describes the
+        // audio rather than the song. Method c drops these words via
+        // whisper_markers::is_marker(); method b never did, so "Музика" and
+        // "Muzika" reached the LRC as if they were lyrics. It is checked before the
+        // text is built because a marker-only segment should become the same
+        // placeholder as a wordless hum, not a line reading "[MUSIC]".
+        const bool marker_only = !seg.words.empty() &&
+                                 whisper_markers::segment_is_non_lyric(seg);
+        if (marker_only) dropped_markers++;
+
         std::string text = seg.text;
         size_t b = text.find_first_not_of(" \t\r\n");
         if (b == std::string::npos) continue;
@@ -91,8 +106,9 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
 
         // A segment with no recognisable words keeps its slot in the timeline as a
         // placeholder, and carries no align_text so CTC is not asked to force a
-        // word onto a hum it cannot place.
-        const bool non_lyric = segment_has_no_words(seg);
+        // word onto a hum it cannot place. A marker-only segment is treated the
+        // same way, so its words are dropped here rather than written out.
+        const bool non_lyric = marker_only || segment_has_no_words(seg);
 
         float conf_sum = 0.0f;
         int conf_n = 0;
@@ -109,6 +125,11 @@ static std::vector<AlignedLine> segments_to_lines(const TranscriptionResult& tra
         al.text = non_lyric ? kNonLyricPlaceholder : clean;
         al.align_text = non_lyric ? "" : clean;
         out.push_back(std::move(al));
+    }
+    if (dropped_markers > 0) {
+        fprintf(stderr,
+                "  %d stage-direction segment(s) replaced with %s\n",
+                dropped_markers, kNonLyricPlaceholder);
     }
     return out;
 }

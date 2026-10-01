@@ -1,6 +1,7 @@
 #include "reconcile.h"
 #include "utils.h"
 #include "lyrics.h"
+#include "whisper_markers.h"
 
 #include <algorithm>
 #include <vector>
@@ -27,13 +28,6 @@ struct WWord {
     float prob;
     int seg;
 };
-
-// Whisper tokens that describe the audio rather than lyrics (hallucination markers)
-static inline bool is_whisper_marker(const std::string& w) {
-    std::string lo = utils::normalize(w);
-    return lo == "music" || lo == "applause" || lo == "laughing" ||
-           lo == "laughter" || lo == "applauding" || lo == "singing";
-}
 
 static std::vector<WWord> clean_whisper_words(const TranscriptionResult& whisper) {
     std::vector<WWord> out;
@@ -339,7 +333,7 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
             int prev_k = -1;
             for (int k = f; k <= l; k++) {
                 bool anchor = std::binary_search(anchors.begin(), anchors.end(), k);
-                if (is_whisper_marker(wwords[k].text)) continue;
+                if (whisper_markers::is_marker(wwords[k].text)) continue;
                 if (!anchor) {
                     if (!include_interiors) continue;
                     if (prev_k < 0) continue;
@@ -390,7 +384,7 @@ ReconcileResult reconcile_lyrics(const LyricsDocument& hints,
                 if (avg / words.size() < 0.45) return;
                 std::string txt;
                 for (int k : words) {
-                    if (is_whisper_marker(wwords[k].text)) continue;
+                    if (whisper_markers::is_marker(wwords[k].text)) continue;
                     txt += ' ';
                     txt += wwords[k].text;
                 }
