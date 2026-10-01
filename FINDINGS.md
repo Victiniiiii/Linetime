@@ -387,3 +387,118 @@ count exactly, in either direction. The `eval_b.py` harness in `/tmp/opencode` n
   before tagging 1.4.0.
 - 7 unpushed commits in sounddetect (was 6).
 - htdemucs untested. It remains the only untried idea that addresses 14.1's actual cause.
+---
+
+## 15. Session 10b: htdemucs is out, and the narration filter that works instead
+
+### 15.1 htdemucs is not viable on this GPU — do not retry it
+
+`smank/htdemucs-onnx` loads on the CUDA EP correctly (GPU at 100%, 2.9 GB of 8 GB VRAM,
+~1 CPU thread busy), and then a **single 7.8-second segment does not finish in 30 minutes**
+on the GTX 1070. It was still running when killed; no output file was produced.
+
+The input length is not a tuning knob. The graph contains a `Reshape` to
+`{1,4,-1,343980}`, so any length that is not a multiple of 343980 frames (7.8 s at
+44.1 kHz) fails:
+
+| input | frames | result |
+|---|---|---|
+| 30 s | 1323000 | `Reshape` error on `/Reshape_20` |
+| 8.0 s | 352800 | `Reshape` error on `/Reshape_20` |
+| whole track, qfln 208 s | 9174529 | requests **41 GB** of activation memory |
+| exactly 7.8 s | 343980 | runs, but >30 min, incomplete |
+
+A 3.5-minute song is 27 segments, so even at a hypothetical 1 s/segment this would be fine,
+but 30 min/segment is days per song. The user's call was that this cannot ship in an app
+like this, and that is the right call. **Separation via htdemucs is closed.** The 304 MB
+model is not the problem; the graph's compute on an sm_61 card is.
+
+### 15.2 Five candidate hallucination signals, four rejected on measurement
+
+The goal was a signal that is LOW on a fabrication and HIGH on a genuine repeated
+chorus. Repetition itself cannot be the signal (14.3), so four alternatives were measured
+against the cached transcripts and the 8-song ground truth. Medians over the same runs:
+
+| signal | real (sung) | fabricated | verdict |
+|---|---|---|---|
+| whisper mean word probability | 0.936 | 0.846 | rejected — ranges overlap, and the credit lines themselves scored 0.761 / 0.857 |
+| CTC forced-alignment confidence | 0.605 | 0.585 | rejected — no separation; caught only 1 of 3 |
+| audio RMS over the segment | −18.96 dBFS | −19.06 dBFS | rejected — instrumental outros are as loud as singing |
+| global repetition count | — | — | rejected in 14.3: 17–74% of each song's GT is real chorus |
+| consecutive near-duplicate runs | — | — | rejected — see below |
+
+The last one was the most promising idea in this session, and the ground truth killed it.
+Counting the longest run of back-to-back near-duplicate lines (Jaccard ≥ 0.5) in every
+song with synced GT:
+
+```
+tomb 16   wnkf 9   vugk 9   v2z4 7   xm8u 4   tnz0 4   ybyi 4   opmx eight runs of 3
+```
+
+26 songs legitimately repeat a line back-to-back, the worst being **tomb at 16 consecutive
+lines**. So "whisper printed the same line three times in a row" is not a fabrication
+signal; `tomb` would lose 16 real lyric lines. Measured on the actual method-B output the
+signal also barely fires: max consecutive-duplicate run was 2 on all four songs tested.
+
+Note the trap here. 5e1c's output contains "Artiljerija, Bosanac sam bekrija" three times
+and it *looks* like a loop. It is not — that is the real chorus, and the GT has it four
+times. Two intermediate versions of the labelling harness in this session called that
+chorus a fabrication before a whole-song vocabulary match corrected it. Judging a line
+"real" by matching one neighbouring GT line is wrong for exactly the songs that matter.
+
+### 15.3 What works: a closed-class narration phrase list
+
+The one signal that separates cleanly is categorisation rather than measurement. Whisper's
+broadcast credit line ("Hvala što pratite kanal.", "Hvala na sviđanju!") is *narration
+about the video*, and nobody sings that. So it can be matched lexically, and the
+false-positive rate — the number that actually decides whether this is safe — was measured
+against the database rather than assumed:
+
+```
+8-song test set        0 hits / 270 GT lines   (0.000%)
+all synced GT in DB    1 hit  / 2431 GT lines  (0.041%)
+```
+
+The single hit is `g1um` at 03:29.90, whose ground truth is *itself* "Hvala što pratite
+kanal." — the same hallucination already baked into the reference. That is a small but
+real piece of evidence that `synced_lyrics` carries whisper artefacts, not just sync
+offsets, and it is worth knowing before treating any GT line as settled.
+
+Shipped in `91492f0`. Result on all 8 songs, replaying cached transcripts:
+
+| song | before | after |
+|---|---|---|
+| qfln | `[00:00.00] Hvala što pratite kanal.` | `[00:00.00] [humming]` |
+| 5e1c | `[03:18.68] Hvala što pratite kanal.` | `[03:17.70] [humming]` |
+| 0iac | `[04:01.16] Hvala na sviđanju!` | `[04:01.16] [humming]` |
+| cdeq, 4arx, ufx8, tomb, ov4y | — | byte-identical |
+
+No timing movement: qfln and 0iac timestamps are identical, 5e1c moves at most 2.62 s.
+Regression on 8hfm, old binary vs new: method A and method C both byte-identical, both
+acc@1s 1.000, mean dt 19 ms.
+
+Two entries in the list were wrong in a way that review did not catch and only re-reading
+the output did:
+
+- `s-v-i-đ-a-n-j-u` normalizes to **`svidanju`** (eight letters, one j). Written with two
+  j's, the filter silently missed 0iac.
+- `normalize()` keeps apostrophes and maps U+2019 to `'`, so the entry is **`don't forget
+  to`**, not `dont forget to`.
+
+`tools/narration_probe.cpp` now asserts the whole list in milliseconds with no GPU, model
+or audio. Build: `g++ -std=c++17 tools/narration_probe.cpp -Isrc -pthread`. Lesson worth
+keeping: for a hand-written match list, the test is "does every entry survive its own
+normalizer", and that test is cheap enough to always run.
+
+### 15.4 What is still broken, stated plainly
+
+The repetition-loop failures are **not** fixed. 5e1c's "Artiljerija, Bosanacam Bekrija"
+tail and cdeq looping to EOF transcribe chorus text that genuinely is being sung, so
+neither the audio nor whisper's confidence distinguishes them from a chorus sung four
+times. Everything cheap has now been measured and rejected (15.2). What is left:
+
+- Word-level LRC output instead of one line per ~30 s segment. This does not detect the
+  loop, but it makes the loop *visible and hand-fixable* in the output rather than
+  silently wrong, and it fixes Issue 10 segmentation at the same time. Cheap.
+- A trust check whose signal is not confidence and not repetition. No candidate has been
+  found. Do not build one until something measures clean on 14.3's numbers.
