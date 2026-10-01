@@ -510,14 +510,14 @@ static void cache_transcript(const fs::path& source, const std::string& cache_na
             destination.string().c_str());
 }
 
-TranscriptionResult transcribe_audio(const AudioBuffer& audio,
-                                     const std::string& model_path,
-                                     const std::string& whisper_cli_path,
-                                     const std::string& language,
-                                     Provider provider,
-                                     int threads,
-                                     const std::vector<std::string>& environment_additions,
-                                     const std::string& cache_name) {
+static TranscriptionResult transcribe_single_language(const AudioBuffer& audio,
+                                                      const std::string& model_path,
+                                                      const std::string& whisper_cli_path,
+                                                      const std::string& language,
+                                                      Provider provider,
+                                                      int threads,
+                                                      const std::vector<std::string>& environment_additions,
+                                                      const std::string& cache_name) {
     TranscriptionResult result;
     PrivateTempDirectory temporary;
     try {
@@ -661,5 +661,106 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
     } catch (...) {
         result.error = "transcription failed with an unknown exception";
     }
+    return result;
+}
+
+// --- multi-language merge -----------------------------------------------------
+//
+// A song is not one language. Sredinom is a Bosnian body with an English chorus,
+// and a single value gets half of it wrong either way: under "auto" whisper hears
+// the chorus and misreads the verses, under "bs" it reads the verses and mishears
+// the chorus. Running it twice and keeping the better transcript for each stretch
+// is the only way to hold both.
+//
+// The comparison is per segment, not per track. Comparing whole transcripts would
+// let the majority language veto the minority one, which is precisely the case
+// that needs fixing.
+
+static double mean_word_probability(const WhisperSegment& segment) {
+    if (segment.words.empty()) return 0.0;
+    double total = 0.0;
+    for (const auto& w : segment.words) total += w.prob;
+    return total / (double)segment.words.size();
+}
+
+// Confidence, with a small reward for covering more words so a short confident
+// guess cannot displace a longer accurate one.
+static double segment_score(const WhisperSegment& segment) {
+    return mean_word_probability(segment) + 0.05 * std::log1p((double)segment.words.size());
+}
+
+// Mean probability of whatever the other transcript put over the same audio. A
+// stretch spoken by neither language returns 0 rather than counting as agreement.
+static double coverage_score(const TranscriptionResult& other,
+                             double start_ms, double end_ms) {
+    double total = 0.0;
+    int n = 0;
+    for (const auto& seg : other.segments) {
+        if (!(start_ms < seg.end_ms && seg.start_ms < end_ms)) continue;
+        total += mean_word_probability(seg);
+        n++;
+    }
+    return n > 0 ? total / (double)n : 0.0;
+}
+
+TranscriptionResult transcribe_audio(const AudioBuffer& audio,
+                                     const std::string& model_path,
+                                     const std::string& whisper_cli_path,
+                                     const std::string& language,
+                                     Provider provider,
+                                     int threads,
+                                     const std::vector<std::string>& environment_additions,
+                                     const std::string& cache_name) {
+    // One language is the common case and is not worth a second run.
+    size_t split = language.find('+');
+    if (split == std::string::npos) {
+        return transcribe_single_language(audio, model_path, whisper_cli_path, language,
+                                          provider, threads, environment_additions, cache_name);
+    }
+
+    std::string primary = language.substr(0, split);
+    std::string secondary = language.substr(split + 1);
+    fprintf(stderr, "[transcriber] Multi-language %s + %s: transcribing twice and merging\n",
+            primary.c_str(), secondary.c_str());
+
+    TranscriptionResult a = transcribe_single_language(audio, model_path, whisper_cli_path,
+                                                      primary, provider, threads,
+                                                      environment_additions, cache_name);
+    TranscriptionResult b = transcribe_single_language(audio, model_path, whisper_cli_path,
+                                                      secondary, provider, threads,
+                                                      environment_additions, cache_name);
+    if (!a.success) return a;
+    if (!b.success) return b;
+
+    // The primary transcript is the spine. Its segments keep their place and
+    // duration; only the words inside them can change, so merging cannot alter how
+    // many lines there are or where they sit.
+    TranscriptionResult result;
+    result.success = true;
+    result.language = primary + "+" + secondary;
+    result.systeminfo = a.systeminfo;
+    result.gpu_confirmed = a.gpu_confirmed;
+    int replaced = 0;
+    for (const auto& seg : a.segments) {
+        WhisperSegment best = seg;
+        if (coverage_score(b, seg.start_ms, seg.end_ms) > segment_score(seg) + 0.05) {
+            std::vector<WhisperWord> words;
+            std::string text;
+            for (const auto& other : b.segments) {
+                if (!(seg.start_ms < other.end_ms && other.start_ms < seg.end_ms)) continue;
+                for (const auto& w : other.words) words.push_back(w);
+                if (!text.empty()) text += " ";
+                text += other.text;
+            }
+            if (!words.empty() && !text.empty()) {
+                best.text = text;
+                best.words = words;
+                replaced++;
+            }
+        }
+        result.segments.push_back(best);
+    }
+    fprintf(stderr, "[transcriber] Merge: %d of %zu segments took %s words\n",
+            replaced, result.segments.size(), secondary.c_str());
     return result;
 }
