@@ -517,7 +517,8 @@ static TranscriptionResult transcribe_single_language(const AudioBuffer& audio,
                                                       Provider provider,
                                                       int threads,
                                                       const std::vector<std::string>& environment_additions,
-                                                      const std::string& cache_name) {
+                                                      const std::string& cache_name,
+                                                      float no_speech_threshold) {
     TranscriptionResult result;
     PrivateTempDirectory temporary;
     try {
@@ -574,6 +575,13 @@ static TranscriptionResult transcribe_single_language(const AudioBuffer& audio,
             // what -np hides. progress_output() below drops the per-segment lines
             // from stderr instead, so the user-facing output is unchanged.
         };
+        if (no_speech_threshold >= 0.0f) {
+            // Whisper's own default is 0.6. Passed only when the caller asked for
+            // a specific value, so leaving the flag unset keeps whisper's own
+            // default rather than pinning a number here that could drift.
+            arguments.push_back("-nth");
+            arguments.push_back(std::to_string(no_speech_threshold));
+        }
         if (provider == Provider::CPU)
             arguments.push_back("-ng");
 
@@ -710,12 +718,14 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
                                      Provider provider,
                                      int threads,
                                      const std::vector<std::string>& environment_additions,
-                                     const std::string& cache_name) {
+                                     const std::string& cache_name,
+                                     float no_speech_threshold) {
     // One language is the common case and is not worth a second run.
     size_t split = language.find('+');
     if (split == std::string::npos) {
         return transcribe_single_language(audio, model_path, whisper_cli_path, language,
-                                          provider, threads, environment_additions, cache_name);
+                                          provider, threads, environment_additions, cache_name,
+                                          no_speech_threshold);
     }
 
     std::string primary = language.substr(0, split);
@@ -723,12 +733,21 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
     fprintf(stderr, "[transcriber] Multi-language %s + %s: transcribing twice and merging\n",
             primary.c_str(), secondary.c_str());
 
+    // Each language caches under its own name. They previously shared one, so the
+    // second run overwrote the first and a cached multi-language transcript replayed
+    // as whichever language happened to finish last.
     TranscriptionResult a = transcribe_single_language(audio, model_path, whisper_cli_path,
                                                       primary, provider, threads,
-                                                      environment_additions, cache_name);
+                                                      environment_additions,
+                                                      cache_name.empty() ? primary
+                                                                        : cache_name + "-" + primary,
+                                                      no_speech_threshold);
     TranscriptionResult b = transcribe_single_language(audio, model_path, whisper_cli_path,
                                                       secondary, provider, threads,
-                                                      environment_additions, cache_name);
+                                                      environment_additions,
+                                                      cache_name.empty() ? secondary
+                                                                         : cache_name + "-" + secondary,
+                                                      no_speech_threshold);
     if (!a.success) return a;
     if (!b.success) return b;
 

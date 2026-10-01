@@ -42,6 +42,7 @@ TranscriptionResult transcribe_audio(const AudioBuffer& audio,
                                      Provider provider,
                                      int threads = 16,
                                      const std::vector<std::string>& environment_additions = {},
-                                     const std::string& cache_name = "");
+                                     const std::string& cache_name = "",
+                                     float no_speech_threshold = -1.0f);
 
 TranscriptionResult load_transcription_json(const std::string& json_path);

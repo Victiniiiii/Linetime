@@ -305,6 +305,10 @@ void print_usage() {
         "                           this value (0-1, default: 0)\n"
         "  --recover-missing        Re-emit sung sections the lyrics omit\n"
         "  --separate-vocals      Keep only the centre channel (default on for method b)\n"
+        "  --no-speech-threshold <0-1>\n"
+        "                         Whisper's -nth, how confidently a window must\n"
+        "                         look non-speech before it is discarded\n"
+        "                         (whisper's own default: 0.6)\n"
         "  --no-separate-vocals   Use the full mix instead\n"
         "  --method <a|b|c>         Alignment method (default: a, or b without lyrics)\n"
         "  --boost <float>          CTC non-blank boost (default: 5.0)\n"
@@ -350,6 +354,9 @@ int main(int argc, char** argv) {
     // A is CTC-only and never transcribes, and C already has the lyric text as an
     // authority, so re-deriving what is sung would only add risk.
     bool separate_vocals_set = false;
+    // Whisper's own -nth. Left negative so "unset" is distinguishable from 0.0,
+    // which is a meaningful threshold in its own right.
+    float no_speech_threshold = -1.0f;
     std::vector<std::string> positionals;
 
     for (int i = 1; i < argc; i++) {
@@ -409,6 +416,14 @@ int main(int argc, char** argv) {
           } else if (arg == "--no-separate-vocals") {
               separate_vocals = false;
               separate_vocals_set = true;
+          } else if (arg == "--no-speech-threshold" || arg == "-nth") {
+              std::string value;
+              if (!take_numeric_value(argc, argv, i, arg.c_str(), value) ||
+                  !parse_float_value(value, no_speech_threshold) ||
+                  no_speech_threshold < 0.0f || no_speech_threshold > 1.0f) {
+                  fprintf(stderr, "Error: --no-speech-threshold requires a number from 0 to 1\n");
+                  return 1;
+              }
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             return 0;
@@ -562,7 +577,8 @@ int main(int argc, char** argv) {
                 runtime_environment(executable_dir, whisper_cli_path);
             trans = transcribe_audio(audio, model_c_path, whisper_cli_path, language,
                                      provider, 16, environment,
-                                     fs::path(audio_path).stem().string());
+                                     fs::path(audio_path).stem().string(),
+                                     no_speech_threshold);
         }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
@@ -606,7 +622,8 @@ int main(int argc, char** argv) {
                 runtime_environment(executable_dir, whisper_cli_path);
             trans = transcribe_audio(audio, model_c_path, whisper_cli_path, language,
                                      provider, 16, environment,
-                                     fs::path(audio_path).stem().string());
+                                     fs::path(audio_path).stem().string(),
+                                     no_speech_threshold);
         }
         if (trans.success) {
             fprintf(stderr, "  Transcribed: %zu segments, language=%s\n", trans.segments.size(), trans.language.c_str());
