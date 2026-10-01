@@ -4,6 +4,10 @@ Written by the assistant for whoever picks this up. Everything below was measure
 this machine unless marked as assumed. Where I got something wrong, that is recorded
 too, because it is the fastest way to avoid repeating it.
 
+**Session 10 additions are marked `S10`.** They supersede section 13 where they
+conflict with it: the two cheapest suggestions in section 13 were both measured and
+one of them is now known to be actively harmful. See section 14.
+
 ## 1. Read this first: three claims I made that turned out wrong
 
 These cost real time. Do not trust a single measurement without checking the whole set.
@@ -252,9 +256,134 @@ error when the release predates the asset, and GPU runs work from hand-installed
 
 ## 13. Suggested order next session
 
-1. `--no-speech-threshold` tuning on the whisper spawn, measured on qfln. Cheapest shot at
-   hallucinations and nothing else has touched them.
-2. Re-run the 8-song set with whatever that yields, comparing against 213/270.
-3. Decide the fate of the uncommitted VAD plumbing.
-4. Delete or retarget the `v1.3.0` tag, then push, then tag 1.4.0.
+Items 1 and 2 were done in session 10 and item 1 turned out to be a dead end. See
+section 14 before acting on this list.
+
+1. ~~`--no-speech-threshold` tuning on the whisper spawn, measured on qfln.~~ **S10: done,
+   no effect. Do not spend more time on it.**
+2. ~~Re-run the 8-song set with whatever that yields, comparing against 213/270.~~ **S10:
+   done, 229/270 with the marker filter in place.**
+3. Decide the fate of the uncommitted VAD plumbing. Still open.
+4. Delete or retarget the `v1.3.0` tag, then push, then tag 1.4.0. Still open.
 5. Only then consider htdemucs, and measure plain 316 MB before the 1.26 GB bag.
+
+## 14. Session 10: what was measured, including one plan that was wrong
+
+### 14.1 `--no-speech-threshold` does nothing. The flag is real; the hope was not.
+
+Now exposed as `--no-speech-threshold` / `-nth`, forwarded to whisper and verified to
+reach the child (`-nth 0.420000` observed in the spawned argv via a recording wrapper).
+
+Measured, method b on GPU, transcripts compared byte for byte:
+
+```
+song    qfln (hallucinating)   5e1c (hallucinating)
+nth     0.05   0.30 0.60 0.80 0.95    0.05  0.95
+result  identical in every case
+```
+
+The reason is visible in the source. `no_speech_thold` is read in exactly two places
+(`vendor/whisper.cpp/src/whisper.cpp:7742` and `:7772`), and both require either a failed
+temperature or a genuinely silent window. `Hvala što pratite kanal` is neither: whisper
+decodes it confidently *and* believes it heard speech, so no threshold touches it. The same
+argument covers `-sns`, which is already passed — the hallucination is ordinary words, not
+a non-speech token.
+
+This confirms the section-5 lesson a second time: **confidence stays high on fabrications,
+so no threshold separates them.** Two thresholds have now been tried and both failed. The
+next attempt needs a model.
+
+Keep the flag anyway: it is a genuine knob for speech-heavy tracks, where it does bite. It
+is exposed rather than hardcoded so that is not our decision to make silently.
+
+### 14.2 Method b was writing stage directions as lyrics. Fixed.
+
+`is_whisper_marker` lived as a `static` in `reconcile.cpp`, so method c used it and method b
+did not — Known Issue 8. It now lives in `src/whisper_markers.h` and both paths call it.
+
+One extra detail: `utils::normalize` transliterates Cyrillic, so `Музика` reached the
+comparison as `muzika`, which the old Latin-only list never matched. The list now carries the
+transliterated Serbian spellings, plus subtitling narration (`Субтитрујуће`).
+
+Measured on the 8-song set, cached transcripts so only the filter differs:
+
+```
+4arx   2 marker lines ("Музика", "Субтитрујуће") -> [humming]
+qfln 5e1c cdeq ufx8   byte-identical, no regression
+```
+
+### 14.3 The planned BoH / self-repetition layer would DELETE CORRECT OUTPUT
+
+The plan in `AGENTS.md` proposes BoH removal, using "self-repeating transcript" as the
+trigger for the trust check. **Repetition is not a hallucination signal on this test set.**
+Counting lines repeated 3+ times in the *ground truth itself*:
+
+```
+tomb   51/69 lines (74%) are a repeated chorus, one line x11
+cdeq   39%     ov4y 46%     5e1c 53%
+ufx8   40%     qfln 50%     0iac 24%     4arx 17%
+```
+
+These songs are verses and choruses. A repetition trigger would fire on every one of the
+eight and strip real lyrics. **Do not implement BoH as planned.** If a trust check is built,
+it needs a signal that is absent from genuine choruses — word probability does not qualify,
+and neither does repetition. This is the clearest result of the session and it cost one
+query to establish.
+
+### 14.4 Per-song offsets are NOT the dominant error, contrary to Known Issue 1
+
+Known Issue 1 claims DB GT carries per-song constant offsets. Removing the per-song median
+residual barely moves the total and makes two songs worse:
+
+```
+                     acc@0.5s  acc@1s  acc@2s
+raw                    0.548    0.678   0.704
+per-song offset removed 0.609    0.670   0.722
+```
+
+Only `4arx` has a real offset (+10.56 s median, 0.29 -> 0.57 once removed). The other seven sit
+within ±0.9 s. So the per-song offset is a property of *one or two* broken DB entries, not a
+systematic convention — which is consistent with section 8 and section 9.
+
+### 14.5 Current method-B standing (8 songs, 270 GT lines)
+
+```
+song     GT   out  ratio  a@0.5s  a@1s  a@2s
+qfln     16    17   1.06   1.000  1.000  1.000
+5e1c     30    24   0.80   0.462  0.538  0.538
+cdeq     15    20   1.33   0.500  0.500  0.500
+4arx     36    21   0.58   0.286  0.286  0.286
+ufx8     30    24   0.80   0.846  0.846  0.923
+tomb     69    36   0.52   0.538  0.538  0.615
+ov4y     41    41   1.00   0.433  0.867  0.867
+0iac     33    46   1.39   0.250  0.333  0.417
+TOTAL   270   229   0.85   0.548  0.678  0.704
+```
+
+229/270 lines against section 4's 213/270. Note these are *not* all comparable to section 4:
+`--separate-vocals` and the marker filter both landed in between, so the comparison is
+directional, not like-for-like.
+
+### 14.6 A scoring mistake worth not repeating (the section-1 trap, again)
+
+Method C on `8hfm` first scored **0.594 acc@1s, mean dt 2293 ms**. That was wrong. The tool
+emits one extra line with empty text at a whisper gap, which shifted every later line by one
+row; a naive index-aligned comparison then scored shifted rows against the wrong GT lines.
+Re-scored with a DP alignment that tolerates spurious lines:
+
+```
+method A  8hfm  32/32  acc@1s 1.000  mean dt  19 ms
+method C  8hfm  32/32  acc@1s 1.000  mean dt  19 ms
+```
+
+Both methods are fine. The harness was wrong, not the tool. **Any harness that compares by
+line index needs a DTW-style alignment**, because the output line count never matches the GT
+count exactly, in either direction. The `eval_b.py` harness in `/tmp/opencode` now does this.
+
+### 14.7 Still open, unchanged from section 13
+
+- VAD plumbing in TaratorMusic, 2 uncommitted files, proven inert on singing.
+- `v1.3.0` tag still points at `86b9aed`, which predates every fix. Delete or retarget
+  before tagging 1.4.0.
+- 7 unpushed commits in sounddetect (was 6).
+- htdemucs untested. It remains the only untried idea that addresses 14.1's actual cause.

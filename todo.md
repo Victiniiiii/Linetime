@@ -1,6 +1,9 @@
 # TODO
 
 - Batch mode (process multiple songs)
+- Hallucination trust check for method B (route low-trust transcripts to the CTC branch)
+  — needs a signal that is NOT repetition and NOT word probability; both proven to fire
+    on correct output (`FINDINGS.md` §14.3, §14.1). htdemucs is the remaining untried idea.
 - Return completion percentage in stdout (JSON progress output)
 - Test with more languages and genres
 - Short-line merging (words split across lines by LRC)
