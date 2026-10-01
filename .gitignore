@@ -32,6 +32,11 @@ examples/
 test/
 check/
 
+# Scratch: local test rig (symlinks to dist/ + a copied binary), cached whisper
+# transcripts, and eval harnesses. Rebuilt on demand, nothing here belongs in
+# history.
+tcache/
+
 # Build binary in root
 linetime
 

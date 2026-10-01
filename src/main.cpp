@@ -50,6 +50,11 @@ static bool is_interjection_word(const std::string& w) {
 // caller as [humming] rather than dropped, so the timing of a vocal passage that
 // carries no words survives into the LRC instead of leaving a silent gap.
 static bool segment_has_no_words(const WhisperSegment& seg) {
+    // Spoken broadcast narration ("Hvala sto pratite kanal.") is the same case
+    // wearing real words: it describes the video, not the song. Checked first
+    // because every word in it is an ordinary word, so the per-word test below
+    // would pass it through as lyric content.
+    if (whisper_markers::is_narration(seg.text)) return true;
     // A credit line or a real lyric both produce words here. Only a hum, an
     // instrumental passage or a silence produces none, and those are the cases the
     // placeholder exists for. A segment made entirely of stage directions
