@@ -492,13 +492,115 @@ normalizer", and that test is cheap enough to always run.
 
 ### 15.4 What is still broken, stated plainly
 
-The repetition-loop failures are **not** fixed. 5e1c's "Artiljerija, Bosanacam Bekrija"
-tail and cdeq looping to EOF transcribe chorus text that genuinely is being sung, so
-neither the audio nor whisper's confidence distinguishes them from a chorus sung four
-times. Everything cheap has now been measured and rejected (15.2). What is left:
+**Correction to this section as it stood earlier in the session: 5e1c is NOT a repetition
+loop.** It appeared in three separate lists as one. What it actually does is place two
+chorus lines in the outro (184.5 s and 201.3 s) where the vocals end at 167.9 s and the
+audio runs to 216.1 s — so it over-*reaches* at the tail, while under-producing repeats
+elsewhere (24 output lines against 29 GT lines). Its chorus "Artiljerija, Bosanacam
+Bekrija" looks like a loop because the GT has that line four times; judging a whisper line
+real by matching one neighbouring GT line is exactly the mistake 15.2 warns about.
 
-- Word-level LRC output instead of one line per ~30 s segment. This does not detect the
-  loop, but it makes the loop *visible and hand-fixable* in the output rather than
-  silently wrong, and it fixes Issue 10 segmentation at the same time. Cheap.
-- A trust check whose signal is not confidence and not repetition. No candidate has been
-  found. Do not build one until something measures clean on 14.3's numbers.
+So the outstanding repetition-loop class is **cdeq only**, and one song is a much weaker
+claim than three. The remaining failures transcribe chorus text that genuinely is being
+sung, so neither the audio nor whisper's confidence distinguishes them from a chorus sung
+four times. Everything cheap has now been measured and rejected (15.2).
+
+## 16. The database ground truth is verified, not just "a reference"
+
+§8 and Known Issue 1 both treat `synced_lyrics` as untrustworthy. For these songs that is
+no longer true — it was cross-checked against **LRCLIB**, an independent synced-lyrics
+database, at `https://lrclib.net/api/search` and `/api/get` (send a `User-Agent`; it
+returns 503 often enough to need backoff).
+
+| song | LRCLIB | vs DB |
+|---|---|---|
+| qfln, 5e1c, ufx8, 0iac | plain lyrics only | text identical on all lines |
+| tomb, ov4y, 8hfm | synced | text identical, and **timing identical** |
+| cdeq, 4arx | nothing found | DB only |
+
+- **Text: 100% line-for-line agreement on all 7 songs LRCLIB had.** The DB's lyrics are
+  correct, not merely plausible.
+- **Timing: tomb and ov4y match LRCLIB exactly (median difference 0.00 s, 69/69 and 41/41
+  rows identical).** 8hfm agrees within 1 s on all 32 rows. This retires Known Issue 1's
+  per-song offset story *for those songs* — ov4y's median residual is +0.48 s, not an
+  offset. The offsets in Known Issue 1 were measured against tgol/v2z4/mrz8, which were
+  separately confirmed DB-broken; they do not generalise.
+- `0iac`'s last GT line is `[04:00.66] Via Rade Ilic` — a *credit line*, same class as
+  "Hvala što pratite kanal." Two independent confirmations now that `synced_lyrics`
+  carries whisper artefacts, since GT cannot be used to score the narration filter's
+  output as if every GT line were a lyric.
+- cdeq and 4arx have no LRCLIB entry. Their DB rows are unverified. Do not quote a cdeq
+  timing number as measured against truth.
+
+## 17. Method B's real defect was not hallucination — it was split lines
+
+Method B's headline accuracy was being blamed on hallucination. Labelling every output
+line against GT showed most of the damage was something else entirely: **whisper splits a
+lyric line and emits the tail as its own segment.** 46 of 242 lines on the 8-song set.
+
+```
+[00:55.28] Godinama jedna jabuka zrela, podijeli na dugo na dva ista
+[01:01.80] dijela                          <- same lyric, two LRC entries
+[01:26.56] lete.
+[00:29.10] ale druge
+```
+
+Ground truth contains no one- or two-word line anywhere, so these were never
+hallucinations. They are pure output damage — an LRC no karaoke player can use. Fixed in
+`815f0a8` by rejoining a segment of ≤2 words into the line above it. All 39 merges were
+checked against GT: **none lost coverage of the line it belonged to.**
+
+| 8 songs, method B | before | after |
+|---|---|---|
+| text accuracy | 0.353 | **0.383** |
+| acc@0.5s | 0.410 | **0.497** |
+| acc@1s | 0.500 | **0.601** |
+| acc@2s | 0.563 | **0.645** |
+
+No song regressed. Methods A and C on 8hfm are unchanged at 1.000.
+
+### 17.1 Three merge signals, two of them wrong
+
+| signal | merges | why it fails |
+|---|---|---|
+| previous line does not end in punctuation | 196/234 | almost every boundary looks unfinished. Collapses 242 lines to 46 |
+| current segment starts lowercase | 39 | **correct and all 39 were sound** — but the check is ASCII, and Serbian returns in Cyrillic whose leading byte is neither case. 4arx collapsed 21 lines → 9 |
+| current segment is ≤ 2 words | 39 | **used.** Script-agnostic, needs no case table |
+
+The lowercase signal is genuinely good and is the one to reach for if this is revisited
+with a real Unicode case table — do not re-derive that it does not work, it does.
+
+The time gap between segments is useless as well: genuine line breaks routinely have a
+0.00 s gap.
+
+Two bugs found while validating, both worth not repeating:
+
+- The repeat guard (`"don't glue a repeated refrain"`) first used `strstr`. The fragment
+  `"ela"` is the tail of `"zrela"`, so it matched inside that word and refused a merge
+  that was obviously right. Compare **whole words**, not substrings.
+- `is_line_tail` counts words with `isspace`-style splitting. `std::isspace` on a signed
+  char with a high bit set is UB; splitting on an explicit `' '`/`'\t'` test avoids it and
+  matches what the Python A/B tool does.
+
+### 17.2 A trustworthy scorer, and why the old numbers must not be compared to these
+
+`tools/score_b.py` (new, replaces the lost `eval_b.py`). Monotone DP, one predicted line
+may absorb a run of consecutive GT lines, timing scored only on the GT line that *starts*
+a segment. Transliterates Cyrillic and strips diacritics first — comparing raw strings
+scores correct Serbian as wrong.
+
+**The Session 9 figures (acc 0.63–0.88, 300 predicted lines) are not reproducible and do
+not use this definition.** Their per-song predicted-line counts do not match the same
+build's output at all (`ov4y` 77 predicted lines when the tool wrote 41), so they were
+computed over a different unit. Session 10b's `score_b.py` was also broken — it compared a
+single line's containment against a *cumulative* DP score, so single-line blocks were
+almost never chosen and every alignment came out shifted by two lines.
+
+Two numbers to keep in mind when reading any accuracy figure:
+
+- **Oracle ceiling for the pre-fix output was 0.502** — the best containment any GT line
+  could reach from any predicted line, ignoring order entirely. Read a method-B `acc`
+  against that, not against 1.0.
+- **Do not tune a merge rule on `acc`.** It rewards over-merging: 46 enormous blob lines
+  score 0.565, higher than any honest output. Report fragment count (lines of ≤2 words)
+  alongside it, or the rule will be optimised straight into rubble.
