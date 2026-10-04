@@ -38,6 +38,19 @@ else
     CMAKE_EXTRA_ARGS+=("-DLINETIME_ONNXRUNTIME_STATIC=ON" "-DLINETIME_ENABLE_CUDA=OFF" "-DLINETIME_ENABLE_COREML=OFF")
 fi
 
+# whisper-cli's CUDA backend needs a CUDA toolkit, and this machine has no system
+# one. The toolkit is vendored, so use it when the caller has not named their own.
+# CUDAToolkit_ROOT locates the headers and libraries; CUDACXX names the compiler,
+# because CMake will not find nvcc under a toolkit root that is not on PATH.
+# Without both, whisper's configure step stops with "CUDA Toolkit not found" and
+# then "No CMAKE_CUDA_COMPILER could be found".
+VENDORED_CUDA="${ROOT_DIR}/vendor/cuda-toolkit"
+if [ "${CUDA_ENABLED}" -eq 1 ] && [ -z "${CUDAToolkit_ROOT:-}" ] && [ -x "${VENDORED_CUDA}/bin/nvcc" ]; then
+    export CUDAToolkit_ROOT="${VENDORED_CUDA}"
+    export CUDACXX="${VENDORED_CUDA}/bin/nvcc"
+    printf 'Using vendored CUDA toolkit at %s\n' "${CUDAToolkit_ROOT}"
+fi
+
 printf '=== Linetime bundle build ===\n'
 printf 'Build directory: %s\n' "${BUILD_DIR}"
 printf 'ONNX Runtime: %s\n' "${ONNXRUNTIME_DIR}"
@@ -49,7 +62,26 @@ cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
     -DLINETIME_ONNXRUNTIME_DIR="${ONNXRUNTIME_DIR}" \
     -DLINETIME_BUILD_WHISPER_CLI=ON \
     "${CMAKE_EXTRA_ARGS[@]}"
-cmake --build "${BUILD_DIR}" --target linetime whisper-cli --parallel "${JOBS}"
+
+# linetime is plain C++ and scales with cores. whisper-cli's CUDA backend is not:
+# every nvcc process wants a few GB, so at -j$(nproc) on a 16 GB machine the
+# compiler is OOM-killed partway through and the build looks broken for no reason.
+# Give it its own, smaller job count.
+CUDA_JOBS="${LINETIME_CUDA_JOBS:-}"
+if [ -z "${CUDA_JOBS}" ]; then
+    CUDA_JOBS="$JOBS"
+    if [ "${CUDA_ENABLED}" -eq 1 ] && [ -r /proc/meminfo ]; then
+        MEM_GB="$(awk '/^MemTotal:/ {print int($2 / 1048576)}' /proc/meminfo)"
+        CUDA_JOBS=$(( MEM_GB / 6 ))
+        [ "${CUDA_JOBS}" -lt 1 ] && CUDA_JOBS=1
+        [ "${CUDA_JOBS}" -gt "${JOBS}" ] && CUDA_JOBS="${JOBS}"
+    fi
+fi
+printf 'Building linetime at -j%s, whisper-cli at -j%s (%s GB RAM detected)\n' \
+    "${JOBS}" "${CUDA_JOBS}" "${MEM_GB:-unknown}"
+
+cmake --build "${BUILD_DIR}" --target linetime --parallel "${JOBS}"
+cmake --build "${BUILD_DIR}" --target whisper-cli --parallel "${CUDA_JOBS}"
 
 if [ ! -x "${BUILD_DIR}/bin/linetime" ]; then
     printf 'Linetime build did not produce %s\n' "${BUILD_DIR}/bin/linetime" >&2
