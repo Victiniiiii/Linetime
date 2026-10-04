@@ -409,7 +409,7 @@ static std::vector<std::string> runtime_environment(const fs::path& base,
 
 void print_usage() {
     fprintf(stderr,
-        "linetime v1.3 - Lyric-Audio Timestamp Aligner\n\n"
+        "linetime v1.4 - Lyric-Audio Timestamp Aligner\n\n"
         "Usage: linetime <audio_file> [lyrics_file] [options]\n"
         "       cat lyrics.txt | linetime <audio_file> - [options]\n"
         "       linetime <audio_file> [options]     (no lyrics -> method b)\n\n"
