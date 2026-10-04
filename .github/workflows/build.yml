@@ -172,6 +172,31 @@ jobs:
               done
             done
           done
+          # cp -L above flattens every symlink, so each versioned CUDA library
+          # lands in the bundle twice under two names: libcublasLt.so.12 and
+          # libcublasLt.so.12.6.3.3 are the same 469 MB of code. Across cublas,
+          # cublasLt, cudart, curand, cufft and cuDNN that duplicated ~2 GB and
+          # pushed this archive past GitHub's 2 GiB per-asset limit, which failed
+          # the release 48 minutes in with nothing to point at.
+          #
+          # Put the SONAME back as a symlink to the real file. Only where the
+          # target is unambiguous: with two versioned files present (the vendored
+          # ggml builds ship 0.24.0 and 0.25.1 side by side) guessing which one
+          # the binary was linked against would be a coin flip, so leave those
+          # alone and let the size check below catch them.
+          for soname in lib/*.so.*; do
+            case "$soname" in *.so.*.*) continue ;; esac
+            [ -L "$soname" ] && continue
+            [ -e "$soname" ] || continue
+            candidates=()
+            for real in "$soname".*; do
+              [ -f "$real" ] && candidates+=("$real")
+            done
+            if [ "${#candidates[@]}" -eq 1 ]; then
+              ln -sf "$(basename "${candidates[0]}")" "$soname"
+            fi
+          done
+
           missing=
           for required_library in \
             libonnxruntime.so.1 \
@@ -214,6 +239,21 @@ jobs:
             printf '%s\n' "$archive_listing" | grep -Fx "$required" >/dev/null
           done
           printf '%s\n' "$archive_listing" | grep -E '^lib/[^/]+' >/dev/null
+
+          # GitHub rejects a release asset of 2 GiB or more, and the rejection
+          # only surfaces in the upload step after every build has finished. Check
+          # it here so the failure names this archive and this limit instead.
+          size="$(stat -c%s linetime-linux-x64-gpu.tar.gz)"
+          limit=2147483648
+          if [ "$size" -ge "$limit" ]; then
+            echo "linetime-linux-x64-gpu.tar.gz is $size bytes, over the $limit byte limit" >&2
+            printf 'largest entries in lib/:\n' >&2
+            du -a lib | sort -rn | head -15 >&2
+            exit 1
+          fi
+          printf 'archive is %s bytes (%.2f GiB), limit %.2f GiB\n' \
+            "$size" "$(awk "BEGIN{print $size/1073741824}")" \
+            "$(awk "BEGIN{print $limit/1073741824}")"
 
       # Also published on its own, because the app lets a user install the CUDA
       # whisper-cli without also taking the multi-gigabyte aligner bundle. Upstream
