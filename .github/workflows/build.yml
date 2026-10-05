@@ -173,11 +173,13 @@ jobs:
             done
           done
           # cp -L above flattens every symlink, so each versioned CUDA library
-          # lands in the bundle twice under two names: libcublasLt.so.12 and
-          # libcublasLt.so.12.6.3.3 are the same 469 MB of code. Across cublas,
-          # cublasLt, cudart, curand, cufft and cuDNN that duplicated ~2 GB and
-          # pushed this archive past GitHub's 2 GiB per-asset limit, which failed
-          # the release 48 minutes in with nothing to point at.
+          # lands in the bundle two or three times under different names:
+          # libcublasLt.so.12 and libcublasLt.so.12.6.3.3 are the same 469 MB
+          # of code, and the bare linker link libcublasLt.so is a third copy
+          # of it. Across cublas, cublasLt, cudart, curand, cufft and cuDNN
+          # that duplicated ~2 GB and pushed this archive past GitHub's 2 GiB
+          # per-asset limit, which failed the release 48 minutes in with
+          # nothing to point at.
           #
           # Put the SONAME back as a symlink to the real file. Only where the
           # target is unambiguous: with two versioned files present (the vendored
@@ -195,6 +197,23 @@ jobs:
             if [ "${#candidates[@]}" -eq 1 ]; then
               ln -sf "$(basename "${candidates[0]}")" "$soname"
             fi
+          done
+          # The loop above never touched the bare linker links (libcublasLt.so
+          # with no version at all): its glob is lib/*.so.*. The loader never
+          # opens those names (DT_NEEDED points at the SONAME), so delete the
+          # copy wherever a versioned sibling exists. Libraries that only
+          # exist unversioned (libonnxruntime_providers_cuda.so,
+          # libonnxruntime_providers_shared.so) have no such sibling and are
+          # kept. The smoke test below guards the deletion.
+          for link in lib/*.so; do
+            [ -e "$link" ] || continue
+            [ -L "$link" ] && continue
+            stem="$(basename "$link" .so)"
+            for versioned in "lib/${stem}.so".*; do
+              [ -e "$versioned" ] || continue
+              rm -f "$link"
+              break
+            done
           done
 
           missing=

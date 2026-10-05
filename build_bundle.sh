@@ -148,6 +148,37 @@ if [ "${CUDA_ENABLED}" -eq 1 ]; then
         copy_glob "${cuda_directory}" 'cufft64*.dll'
         copy_glob "${cuda_directory}" 'cudnn*.dll'
     done
+    # copy_glob uses cp -L, which flattens every symlink into a full second
+    # (or third) copy: libcublasLt.so.12, libcublasLt.so.12.6.3.3 and the bare
+    # linker link libcublasLt.so are the same bytes three times. Restore the
+    # SONAME as a symlink where the target is unambiguous, then delete the
+    # bare linker link wherever a versioned sibling exists (the loader only
+    # ever opens the SONAME). Libraries that exist solely unversioned
+    # (libonnxruntime_providers_cuda.so) have no versioned sibling and are
+    # kept. Without this, lib/ roughly doubles and the release archive
+    # exceeds GitHub's 2 GiB per-asset limit (see build.yml).
+    for soname in "${DIST_DIR}"/lib/*.so.*; do
+        case "$soname" in *.so.*.*) continue ;; esac
+        [ -L "$soname" ] && continue
+        [ -e "$soname" ] || continue
+        candidates=()
+        for real in "$soname".*; do
+            [ -f "$real" ] && candidates+=("$real")
+        done
+        if [ "${#candidates[@]}" -eq 1 ]; then
+            ln -sf "$(basename "${candidates[0]}")" "$soname"
+        fi
+    done
+    for link in "${DIST_DIR}"/lib/*.so; do
+        [ -e "$link" ] || continue
+        [ -L "$link" ] && continue
+        stem="$(basename "$link" .so)"
+        for versioned in "${DIST_DIR}/lib/${stem}.so".*; do
+            [ -e "$versioned" ] || continue
+            rm -f "$link"
+            break
+        done
+    done
     # GLIBCUDA needs the cuBLASLt/cuDNN versions that match the runtime the
     # provider was linked against, so require one match per component.
     for component in cudart cublas cublasLt curand cufft cudnn; do
