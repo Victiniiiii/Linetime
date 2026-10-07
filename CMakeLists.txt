@@ -240,4 +240,9 @@ if(LINETIME_BUILD_WHISPER_CLI)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin"
         RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin")
+    if(UNIX AND NOT APPLE)
+        target_link_options(whisper-cli PRIVATE
+            "-Wl,-rpath,$ORIGIN"
+            "-Wl,-rpath,$ORIGIN/lib")
+    endif()
 endif()

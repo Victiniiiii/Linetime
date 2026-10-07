@@ -82,18 +82,24 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install CUDA 12 toolkit and cuDNN 9
+      - name: Install CUDA 12 toolkit
         run: |
           set -euo pipefail
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
-          # cuDNN is not part of cuda-toolkit, and the runner image's preinstalled
-          # copy is version 8. ONNX Runtime 1.19's CUDA provider links against
-          # cuDNN 9, so without this lib/libcudnn.so.9 is never collected and the
-          # published bundle cannot load the provider.
-          sudo apt-get install -y cuda-toolkit-12-6 libcudnn9-cuda-12
-          test -e /usr/lib/x86_64-linux-gnu/libcudnn.so.9
+          sudo apt-get install -y cuda-toolkit-12-6
+
+      - name: Install Linux cuDNN 9.0.0 (pinned for Pascal compatibility)
+        run: |
+          set -euo pipefail
+          # cuDNN 9.27 breaks on Pascal (GTX 1070). Pin to 9.0.0 which works.
+          wget -q https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.0.0.14_cuda12-archive.tar.xz
+          tar xf cudnn-linux-x86_64-9.0.0.14_cuda12-archive.tar.xz
+          mkdir -p vendor/cudnn
+          cp -r cudnn-linux-x86_64-9.0.0.14_cuda12/include/* vendor/onnxruntime-gpu/include/
+          cp -r cudnn-linux-x86_64-9.0.0.14_cuda12/lib/* vendor/onnxruntime-gpu/lib/
+          test -e vendor/onnxruntime-gpu/lib/libcudnn.so.9
 
       - name: Download ONNX Runtime GPU
         run: |
@@ -157,6 +163,13 @@ jobs:
               cp -L "$source" "lib/$(basename "$source")"
             done
           done
+          # cuDNN 9.0.0 from vendored vendor/onnxruntime-gpu/lib (pinned for Pascal)
+          for pattern in 'libcudnn*.so*'; do
+            for source in vendor/onnxruntime-gpu/lib/$pattern; do
+              [ -e "$source" ] || continue
+              cp -L "$source" "lib/$(basename "$source")"
+            done
+          done
           for cuda_dir in /usr/local/cuda/lib64 /usr/local/cuda/targets/x86_64-linux/lib /usr/lib/x86_64-linux-gnu; do
             [ -d "$cuda_dir" ] || continue
             for pattern in \
@@ -164,8 +177,7 @@ jobs:
               'libcublas.so*' \
               'libcublasLt.so*' \
               'libcurand.so*' \
-              'libcufft.so*' \
-              'libcudnn*.so*'; do
+              'libcufft.so*'; do
               for source in "$cuda_dir"/$pattern; do
                 [ -e "$source" ] || continue
                 cp -L "$source" "lib/$(basename "$source")"
