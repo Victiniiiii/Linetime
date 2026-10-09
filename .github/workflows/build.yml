@@ -90,17 +90,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y cuda-toolkit-12-6
 
-      - name: Install Linux cuDNN 9.0.0 (pinned for Pascal compatibility)
-        run: |
-          set -euo pipefail
-          # cuDNN 9.27 breaks on Pascal (GTX 1070). Pin to 9.0.0 which works.
-          wget -q https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.0.0.14_cuda12-archive.tar.xz
-          tar xf cudnn-linux-x86_64-9.0.0.14_cuda12-archive.tar.xz
-          mkdir -p vendor/cudnn
-          cp -r cudnn-linux-x86_64-9.0.0.14_cuda12/include/* vendor/onnxruntime-gpu/include/
-          cp -r cudnn-linux-x86_64-9.0.0.14_cuda12/lib/* vendor/onnxruntime-gpu/lib/
-          test -e vendor/onnxruntime-gpu/lib/libcudnn.so.9
-
+      # The ONNX Runtime download must come first: the cuDNN step below copies
+      # into vendor/onnxruntime-gpu, which only exists once this has run. It used
+      # to be the other way round, which would have made the cuDNN copy fail even
+      # with a valid URL.
       - name: Download ONNX Runtime GPU
         run: |
           set -euo pipefail
@@ -108,6 +101,24 @@ jobs:
           tar xzf onnxruntime-linux-x64-gpu-1.19.2.tgz
           mkdir -p vendor/onnxruntime-gpu
           cp -r onnxruntime-linux-x64-gpu-1.19.2/* vendor/onnxruntime-gpu/
+
+      - name: Install Linux cuDNN 9.0.0 (pinned for Pascal compatibility)
+        run: |
+          set -euo pipefail
+          # cuDNN 9.27 breaks on Pascal (GTX 1070). Pin to 9.0.0 which works.
+          # 9.0.0.312 is the build number NVIDIA actually publishes; the old
+          # 9.0.0.14 never existed in the redist server and 404'd (wget exit 8),
+          # which is what failed the linux-gpu job in 0.8 s.
+          cudnn_version=9.0.0.312
+          cudnn_archive="cudnn-linux-x86_64-${cudnn_version}_cuda12-archive.tar.xz"
+          # The tarball unpacks into a directory whose name ends in "-archive".
+          cudnn_dir="cudnn-linux-x86_64-${cudnn_version}_cuda12-archive"
+          wget -q "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/${cudnn_archive}"
+          tar xf "${cudnn_archive}"
+          mkdir -p vendor/onnxruntime-gpu/include vendor/onnxruntime-gpu/lib
+          cp -r "${cudnn_dir}/include/." vendor/onnxruntime-gpu/include/
+          cp -r "${cudnn_dir}/lib/." vendor/onnxruntime-gpu/lib/
+          test -e vendor/onnxruntime-gpu/lib/libcudnn.so.9
 
       - name: Build Linetime and whisper-cli
         run: |
